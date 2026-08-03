@@ -1,0 +1,8 @@
+# Code owners for Azure/azure-cosmos-driver
+# https://docs.github.com/articles/about-code-owners
+#
+# The team below is requested for review on every pull request. To actually
+# block merges, enable branch protection on the default branch with
+# "Require review from Code Owners".
+
+* @Azure/azure-cosmos-sdk
