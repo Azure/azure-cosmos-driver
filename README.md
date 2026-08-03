@@ -28,12 +28,36 @@ Built from `azure-sdk-for-rust` crate
 
 ```
 # windows/amd64 (GNU target so mingw cgo can link the archive)
-cargo build -p azure_data_cosmos_driver_native --release --target x86_64-pc-windows-gnu
+# Built with the size-optimized profile (see "Binary size" below).
+cargo build -p azure_data_cosmos_driver_native --release --target x86_64-pc-windows-gnu \
+  --config 'profile.release.opt-level="z"' \
+  --config 'profile.release.lto="fat"' \
+  --config 'profile.release.codegen-units=1' \
+  --config 'profile.release.strip="symbols"'
 # -> target/x86_64-pc-windows-gnu/release/libazurecosmosdriver.a
 ```
 
 Free-standing ABI currently exported (no runtime required):
 `const char *cosmos_version(void);` / header macro `AZURECOSMOSDRIVER_H_VERSION`.
+
+## Binary size
+
+The checked-in `.a` is built with the size-optimized profile recommended by the
+native-driver size measurement work
+([`azure-sdk-for-rust#4748`](https://github.com/Azure/azure-sdk-for-rust/issues/4748)):
+`opt-level="z"`, `lto="fat"`, `codegen-units=1`, `strip="symbols"`. We deliberately
+keep the default `panic="unwind"` — the FFI wrapper relies on `catch_unwind` at the
+C-ABI boundary, so `panic="abort"` is *not* used.
+
+Measured on `x86_64-pc-windows-gnu` versus a plain `--release` build:
+
+| | Plain `--release` | Size-optimized | Reduction |
+|---|---|---|---|
+| Static archive (`.a`) | 47.2 MB | 19.7 MB | **−58%** |
+| Effective linked contribution (cgo POC exe) | 22.0 MB | 11.6 MB | **−47%** |
+
+Behavior is unchanged — the Go cgo smoke test still links the archive and returns
+`cosmos_version() == 0.1.0` across the C ABI.
 
 ## How a consumer links it (local, pre-pipeline)
 
