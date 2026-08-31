@@ -51,6 +51,13 @@ cargo auditable build --release `
 The default unwind panic strategy is retained because the native FFI boundary
 uses panic catching.
 
+The archive is not currently byte-for-byte reproducible. The Rust build embeds
+a wall-clock timestamp, and PR #4991 installs `cargo-auditable` without pinning
+its version. An independent build from the same source and toolchains produced
+different archive bytes while preserving the same ABI/header. Treat the
+committed SHA-256 as this build's identity, bound to its source by the emitted
+metadata, rather than as a hash derivable from the source commit alone.
+
 ## Linking
 
 The module first links the driver archive, forces only `winpthread` static, then
@@ -87,10 +94,13 @@ Run it on Windows with cgo and MinGW-w64:
 ```powershell
 $env:CGO_ENABLED = "1"
 $env:CC = "C:\msys64\mingw64\bin\gcc.exe"
+Push-Location tests\windows-amd64
 go test ./...
+Pop-Location
 ```
 
 Production publication is still blocked on merging and enabling the PR #4991
 pipeline, fixing its missing `windows.0.52.0` packaging, and producing governed
-1ES provenance/SBOM evidence. This repository does not fabricate the absent
-`_manifest` output for this local bootstrap build.
+1ES provenance/SBOM evidence. Reproducible builds also require a normalized
+build timestamp and a pinned `cargo-auditable` version. This repository does
+not fabricate the absent `_manifest` output for this local bootstrap build.
