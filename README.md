@@ -1,0 +1,59 @@
+# Azure Cosmos DB Native Driver
+
+Prebuilt **native Azure Cosmos DB driver** static libraries, packaged as per-platform
+[Go](https://go.dev/) modules so that [`azure-sdk-for-go`](https://github.com/Azure/azure-sdk-for-go)
+(Cosmos DB v2, over an FFI/cgo binding) can statically link the shared Rust driver.
+
+This repository only **distributes the compiled artifacts**. The driver itself is built from the
+[`azure_data_cosmos_driver_native`](https://github.com/Azure/azure-sdk-for-rust/tree/main/sdk/cosmos/azure_data_cosmos_driver_native)
+crate in [`azure-sdk-for-rust`](https://github.com/Azure/azure-sdk-for-rust) — the C-ABI wrapper over
+`azure_data_cosmos_driver` — and the source of record lives there.
+
+## Status
+
+> **This repository is under active bootstrap. Its contents and structure are still being defined.**
+
+- **Release state:** manually built artifacts for integration testing.
+- **Supported platforms:** `windows/amd64`; see the table below.
+- **Versioning / release tags:** no release tags are published yet.
+- **Publishing pipeline:** pending completion and enablement of the Azure SDK for Rust native-driver
+  pipeline.
+
+## Repository layout
+
+One Go module per `GOOS/GOARCH`, each shipping a prebuilt static library:
+
+| Platform (`GOOS/GOARCH`) | Module | State |
+|---|---|---|
+| `windows/amd64` | [`windows/amd64`](./windows/amd64) | Bootstrap artifact available |
+| `darwin/arm64` | `darwin/arm64` | In progress |
+| `linux/amd64`, `linux/arm64` | — | Not yet available |
+
+Each target module has no Go API surface — it is **blank-imported** by the consuming package so that
+its `#cgo LDFLAGS` participate in the final program link. See the
+[`windows/amd64` artifact notes](./docs/windows-amd64.md) for build, provenance, and validation
+details.
+
+## Third-party code
+
+This repository does **not** vendor third-party source. It distributes a **prebuilt static archive**
+(`libazurecosmosdriver.a`) that statically links open-source Rust crates pulled in transitively by the
+driver, including (non-exhaustive): `tokio`, `rustls`, `reqwest`, `h2`, `serde` / `serde_json`,
+`futures`, `url`, `base64`, `bytes`, `uuid`, and `tracing`. These dependencies are licensed under the
+MIT and/or Apache-2.0 licenses. The authoritative, versioned dependency graph is defined by the driver
+crate in [`azure-sdk-for-rust`](https://github.com/Azure/azure-sdk-for-rust); refer to that repository
+for the complete dependency set and their licenses.
+
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md). This project has adopted the
+[Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+
+## Trademarks
+
+This project may contain trademarks or logos for projects, products, or services. Authorized use of
+Microsoft trademarks or logos is subject to and must follow
+[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
+Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or
+imply Microsoft sponsorship. Any use of third-party trademarks or logos are subject to those
+third-party's policies.

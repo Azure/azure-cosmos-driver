@@ -1,0 +1,54 @@
+{
+  "schema_version": 3,
+  "artifact_id": "windows-amd64",
+  "goos": "windows",
+  "goarch": "amd64",
+  "libc": null,
+  "triple": "x86_64-pc-windows-gnu",
+  "native_interface_crate": "azure_data_cosmos_driver_native",
+  "native_interface_version": "0.1.0",
+  "rust_driver_crate": "azure_data_cosmos_driver",
+  "rust_driver_version": "0.7.0",
+  "rust_driver_features": [
+    "tokio",
+    "rustls"
+  ],
+  "source_commit": "6e174cab7e5a18bc89995dcd58fdda44c4e52dda",
+  "built_with": "cargo-auditable",
+  "static_library": {
+    "filename": "libazurecosmosdriver.a",
+    "sha256": "24f35ca88eb21915301e9ccd90fb9606220ca81eb6e6938449ca71bbca019894"
+  },
+  "header": {
+    "filename": "azurecosmosdriver.h",
+    "sha256": "6ffaed7ff60f3aa399db4e4de0c06880f7f0d848d94b62f55fb33b084d999e4f"
+  },
+  "dynamic_library": null,
+  "rustc_native_static_libs": [
+    "-lkernel32",
+    "-lbcrypt",
+    "-lwindows.0.52.0",
+    "-lkernel32",
+    "-lntdll",
+    "-luserenv",
+    "-lws2_32",
+    "-ldbghelp"
+  ],
+  "native_static_libs": [
+    "-lkernel32",
+    "-lbcrypt",
+    "-lwindows.0.52.0",
+    "-lkernel32",
+    "-lntdll",
+    "-luserenv",
+    "-lws2_32",
+    "-ldbghelp"
+  ],
+  "toolchains": {
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "c_compiler": "gcc",
+    "c_compiler_version": "gcc.exe (Rev8, Built by MSYS2 project) 15.2.0"
+  },
+  "generated_utc": "2026-08-31T16:02:41.4796837Z"
+}
