@@ -34,6 +34,28 @@ Each target module has no Go API surface — it is **blank-imported** by the con
 its `#cgo LDFLAGS` participate in the final program link. See each module's own `README.md` for build
 and linking details.
 
+## Pull request validation
+
+Generated-driver pull requests are checked by
+[`Generated driver validation`](./.github/workflows/generated-driver-validation.yml). The validator
+discovers every nested Go module, verifies its generated link file and module identity, and
+cryptographically cross-checks every archive and header against both `provenance.json` and
+`SHA256SUMS`. On Linux AMD64 it also links and runs a temporary cgo consumer that compares the
+runtime native-driver version with the committed header version. This smoke test uses normal Go
+module replacement semantics, matching module-cache/proxy consumption without vendoring. The
+repository's `.gitignore`
+explicitly preserves generated `arm64` target directories that the inherited Visual Studio rules
+would otherwise omit. Validation also rejects undeclared files under the generated platform roots
+and prevents a pull request from deleting or removing targets already published on its base branch.
+
+Run the checks locally with:
+
+```text
+go test ./eng/validate-generated-driver/main.go ./eng/validate-generated-driver/main_test.go
+go run ./eng/validate-generated-driver/main.go integrity
+go run ./eng/validate-generated-driver/main.go native-smoke
+```
+
 ## Third-party code
 
 This repository does **not** vendor third-party source. It distributes a **prebuilt static archive**

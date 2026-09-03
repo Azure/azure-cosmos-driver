@@ -1,0 +1,289 @@
+// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+package main
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+func TestValidateIntegrity(t *testing.T) {
+	root := writeFixture(t)
+	if err := validateIntegrity(root, io.Discard); err != nil {
+		t.Fatalf("validateIntegrity() error = %v", err)
+	}
+}
+
+func TestValidateIntegrityGeneratedTargetMatrix(t *testing.T) {
+	root := writeMatrixFixture(t)
+	if err := validateIntegrity(root, io.Discard); err != nil {
+		t.Fatalf("validateIntegrity() error = %v", err)
+	}
+}
+
+func TestValidateIntegrityRejectsTamperedArchive(t *testing.T) {
+	root := writeFixture(t)
+	writeTestFile(t, filepath.Join(root, "linux", "amd64", "native", "libazurecosmosdriver.a"), "tampered")
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "SHA256 mismatch") {
+		t.Fatalf("validateIntegrity() error = %v, want SHA256 mismatch", err)
+	}
+}
+
+func TestValidateIntegrityRejectsDuplicateModule(t *testing.T) {
+	root := writeFixture(t)
+	manifest := readTestProvenance(t, root)
+	duplicate := manifest.Targets[0]
+	duplicate.ID = "other-id"
+	duplicate.Triple = "other-triple"
+	manifest.Targets = append(manifest.Targets, duplicate)
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "duplicate module path") {
+		t.Fatalf("validateIntegrity() error = %v, want duplicate module path", err)
+	}
+}
+
+func TestValidateIntegrityRejectsUnsafeModulePath(t *testing.T) {
+	root := writeFixture(t)
+	manifest := readTestProvenance(t, root)
+	manifest.Targets[0].ModulePath = "../outside"
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unsafe module_path") {
+		t.Fatalf("validateIntegrity() error = %v, want unsafe module_path", err)
+	}
+}
+
+func TestValidateIntegrityRejectsUndeclaredNestedModule(t *testing.T) {
+	root := writeFixture(t)
+	writeTestFile(t, filepath.Join(root, "darwin", "arm64", "go.mod"), "module github.com/Azure/azure-cosmos-driver/darwin/arm64\n\ngo 1.25.0\n")
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "missing from provenance.json") {
+		t.Fatalf("validateIntegrity() error = %v, want missing provenance target", err)
+	}
+}
+
+func TestValidateIntegrityRejectsUnexpectedGeneratedFile(t *testing.T) {
+	root := writeFixture(t)
+	writeTestFile(t, filepath.Join(root, "linux", "amd64", "README.md"), "unexpected")
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unexpected file under generated platform roots") {
+		t.Fatalf("validateIntegrity() error = %v, want unexpected generated file", err)
+	}
+}
+
+func TestValidateIntegrityAgainstBaseRejectsReleaseDeletion(t *testing.T) {
+	root := writeFixture(t)
+	commitFixture(t, root)
+	if err := validateIntegrityAgainstBase(root, "HEAD", io.Discard); err != nil {
+		t.Fatalf("validateIntegrityAgainstBase() before deletion error = %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "linux")); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{"provenance.json", "SHA256SUMS"} {
+		if err := os.Remove(filepath.Join(root, filename)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := validateIntegrityAgainstBase(root, "HEAD", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "generated release cannot be deleted") {
+		t.Fatalf("validateIntegrityAgainstBase() error = %v, want release deletion failure", err)
+	}
+}
+
+func TestValidateIntegrityAgainstBaseRejectsPublishedTargetRemoval(t *testing.T) {
+	root := writeMatrixFixture(t)
+	commitFixture(t, root)
+	base := readTestProvenance(t, root)
+	removed := base.Targets[len(base.Targets)-1]
+	current := base
+	current.Targets = append([]provenanceTarget(nil), base.Targets[:len(base.Targets)-1]...)
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), current)
+	if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(removed.ModulePath))); err != nil {
+		t.Fatal(err)
+	}
+	var checksums strings.Builder
+	for _, target := range current.Targets {
+		fmt.Fprintf(&checksums, "%s  %s/native/libazurecosmosdriver.a\n", target.StaticLibrarySHA256, target.ModulePath)
+	}
+	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
+
+	err := validateIntegrityAgainstBase(root, "HEAD", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "previously published target") {
+		t.Fatalf("validateIntegrityAgainstBase() error = %v, want published target removal failure", err)
+	}
+}
+
+func writeFixture(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	moduleDirectory := filepath.Join(root, "linux", "amd64")
+	header := "#define AZURECOSMOSDRIVER_H_VERSION \"0.1.0\"\nconst char *cosmos_version(void);\n"
+	archive := "representative-static-archive"
+	writeTestFile(t, filepath.Join(moduleDirectory, "go.mod"), "module github.com/Azure/azure-cosmos-driver/linux/amd64\n\ngo 1.25.0\n")
+	writeTestFile(t, filepath.Join(moduleDirectory, "azurecosmosdriver.h"), header)
+	writeTestFile(t, filepath.Join(moduleDirectory, "native", "azurecosmosdriver.h"), header)
+	writeTestFile(t, filepath.Join(moduleDirectory, "native", "libazurecosmosdriver.a"), archive)
+	writeTestFile(t, filepath.Join(moduleDirectory, "link_linux_amd64.go"), `// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+// Code generated by New-GoModules.ps1; DO NOT EDIT.
+// Target: linux-amd64-glibc  triple: x86_64-unknown-linux-gnu
+
+//go:build cgo && linux && amd64
+
+package driver
+
+// #cgo LDFLAGS: -L${SRCDIR}/native -lazurecosmosdriver -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc
+// #include "azurecosmosdriver.h"
+import "C"
+`)
+
+	target := provenanceTarget{
+		ID:                  "linux-amd64-glibc",
+		Triple:              "x86_64-unknown-linux-gnu",
+		ModulePath:          "linux/amd64",
+		StaticLibrarySHA256: testHash(archive),
+		HeaderSHA256:        testHash(header),
+	}
+	manifest := provenance{
+		SchemaVersion:          1,
+		SourceCommit:           "85c4e1e01ee0b4c2dfdf9533dcad192b626af06d",
+		NativeInterfaceCrate:   "azure_data_cosmos_driver_native",
+		NativeInterfaceVersion: "0.1.0",
+		RustDriverCrate:        "azure_data_cosmos_driver",
+		RustDriverVersion:      "0.1.0",
+		Targets:                []provenanceTarget{target},
+	}
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
+	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), target.StaticLibrarySHA256+"  linux/amd64/native/libazurecosmosdriver.a\n")
+	return root
+}
+
+func writeMatrixFixture(t *testing.T) string {
+	t.Helper()
+	specs := []struct {
+		id         string
+		triple     string
+		modulePath string
+	}{
+		{"windows-amd64", "x86_64-pc-windows-gnu", "windows/amd64"},
+		{"linux-amd64-glibc", "x86_64-unknown-linux-gnu", "linux/amd64"},
+		{"linux-arm64-glibc", "aarch64-unknown-linux-gnu", "linux/arm64"},
+		{"linux-amd64-musl", "x86_64-unknown-linux-musl", "linux/amd64-musl"},
+		{"linux-arm64-musl", "aarch64-unknown-linux-musl", "linux/arm64-musl"},
+		{"darwin-arm64", "aarch64-apple-darwin", "darwin/arm64"},
+	}
+	root := t.TempDir()
+	header := "#define AZURECOSMOSDRIVER_H_VERSION \"0.1.0\"\nconst char *cosmos_version(void);\n"
+	var targets []provenanceTarget
+	var checksums strings.Builder
+	for _, spec := range specs {
+		parts := strings.Split(spec.modulePath, "/")
+		goarch, _, _ := strings.Cut(parts[1], "-")
+		archive := "representative-static-archive-" + spec.id
+		moduleDirectory := filepath.Join(root, filepath.FromSlash(spec.modulePath))
+		writeTestFile(t, filepath.Join(moduleDirectory, "go.mod"), fmt.Sprintf("module github.com/Azure/azure-cosmos-driver/%s\n\ngo 1.25.0\n", spec.modulePath))
+		writeTestFile(t, filepath.Join(moduleDirectory, "azurecosmosdriver.h"), header)
+		writeTestFile(t, filepath.Join(moduleDirectory, "native", "azurecosmosdriver.h"), header)
+		writeTestFile(t, filepath.Join(moduleDirectory, "native", "libazurecosmosdriver.a"), archive)
+		writeTestFile(t, filepath.Join(moduleDirectory, fmt.Sprintf("link_%s_%s.go", parts[0], goarch)), fmt.Sprintf(`// Copyright (c) Microsoft Corporation. All rights reserved.
+// Licensed under the MIT License.
+
+// Code generated by New-GoModules.ps1; DO NOT EDIT.
+// Target: %s  triple: %s
+
+//go:build cgo && %s && %s
+
+package driver
+
+// #cgo LDFLAGS: -L${SRCDIR}/native -lazurecosmosdriver
+// #include "azurecosmosdriver.h"
+import "C"
+`, spec.id, spec.triple, parts[0], goarch))
+
+		archiveHash := testHash(archive)
+		targets = append(targets, provenanceTarget{
+			ID:                  spec.id,
+			Triple:              spec.triple,
+			ModulePath:          spec.modulePath,
+			StaticLibrarySHA256: archiveHash,
+			HeaderSHA256:        testHash(header),
+		})
+		fmt.Fprintf(&checksums, "%s  %s/native/libazurecosmosdriver.a\n", archiveHash, spec.modulePath)
+	}
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), provenance{
+		SchemaVersion:          1,
+		SourceCommit:           "85c4e1e01ee0b4c2dfdf9533dcad192b626af06d",
+		NativeInterfaceCrate:   "azure_data_cosmos_driver_native",
+		NativeInterfaceVersion: "0.1.0",
+		RustDriverCrate:        "azure_data_cosmos_driver",
+		RustDriverVersion:      "0.1.0",
+		Targets:                targets,
+	})
+	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
+	return root
+}
+
+func readTestProvenance(t *testing.T, root string) provenance {
+	t.Helper()
+	contents, err := os.ReadFile(filepath.Join(root, "provenance.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var manifest provenance
+	if err := json.Unmarshal(contents, &manifest); err != nil {
+		t.Fatal(err)
+	}
+	return manifest
+}
+
+func writeTestJSON(t *testing.T, filename string, value any) {
+	t.Helper()
+	contents, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filename, string(contents)+"\n")
+}
+
+func writeTestFile(t *testing.T, filename, contents string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(filename), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filename, []byte(contents), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func commitFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, arguments := range [][]string{
+		{"init", "--quiet"},
+		{"add", "."},
+		{"-c", "user.name=Validator Test", "-c", "user.email=validator@example.invalid", "commit", "--quiet", "-m", "fixture"},
+	} {
+		command := exec.Command("git", arguments...)
+		command.Dir = root
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+		}
+	}
+}
+
+func testHash(contents string) string {
+	sum := sha256.Sum256([]byte(contents))
+	return hex.EncodeToString(sum[:])
+}
