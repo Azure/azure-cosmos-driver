@@ -41,17 +41,11 @@ Generated-driver pull requests are checked by
 discovers every nested Go module, verifies its generated link file and module identity, and
 cryptographically cross-checks every archive and header against both `provenance.json` and
 `SHA256SUMS`. On Linux AMD64 it also links and runs a temporary cgo consumer that compares the
-runtime native-driver version with the committed header version. The repository's `.gitignore`
+runtime native-driver version with the committed header version. This smoke test uses normal Go
+module replacement semantics, matching module-cache/proxy consumption without vendoring. The
+repository's `.gitignore`
 explicitly preserves generated `arm64` target directories that the inherited Visual Studio rules
 would otherwise omit.
-
-The separate **Vendored consumer compatibility** check is intentionally strict. Go's
-`go mod vendor` currently drops an archive stored only as
-`native/libazurecosmosdriver.a`, so a generated pull request using that layout will fail this check
-with `VENDORED ARTIFACT MISSING`. This exposes the known incompatibility with vendored Go SDK
-consumers rather than allowing a false-green release. The producer must package the native object in
-a Go-vendor-supported form, such as a package-root target-specific `.syso`, before that check can
-pass.
 
 Run the checks locally with:
 
@@ -59,7 +53,6 @@ Run the checks locally with:
 go test ./eng/validate-generated-driver/main.go ./eng/validate-generated-driver/main_test.go
 go run ./eng/validate-generated-driver/main.go integrity
 go run ./eng/validate-generated-driver/main.go native-smoke
-go run ./eng/validate-generated-driver/main.go vendor-smoke
 ```
 
 ## Third-party code

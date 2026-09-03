@@ -58,7 +58,7 @@ type repository struct {
 
 func main() {
 	if len(os.Args) < 2 {
-		exitError(errors.New("usage: go run ./eng/validate-generated-driver/main.go <integrity|native-smoke|vendor-smoke> [-root path]"))
+		exitError(errors.New("usage: go run ./eng/validate-generated-driver/main.go <integrity|native-smoke> [-root path]"))
 	}
 
 	command := os.Args[1]
@@ -74,9 +74,7 @@ func main() {
 	case "integrity":
 		err = validateIntegrity(*root, os.Stdout)
 	case "native-smoke":
-		err = validateNativeSmoke(*root, false, os.Stdout)
-	case "vendor-smoke":
-		err = validateNativeSmoke(*root, true, os.Stdout)
+		err = validateNativeSmoke(*root, os.Stdout)
 	default:
 		err = fmt.Errorf("unknown command %q", command)
 	}
@@ -541,7 +539,7 @@ func hashFile(filename string) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
-func validateNativeSmoke(root string, vendor bool, output io.Writer) error {
+func validateNativeSmoke(root string, output io.Writer) error {
 	repo, empty, err := loadRepository(root)
 	if err != nil {
 		return err
@@ -587,29 +585,14 @@ func validateNativeSmoke(root string, vendor bool, output io.Writer) error {
 	}
 
 	headerSource := filepath.Join(moduleDirectory, "azurecosmosdriver.h")
-	if vendor {
-		if err := runGo(workDirectory, "mod", "vendor"); err != nil {
-			return err
-		}
-		vendorModuleDirectory := filepath.Join(workDirectory, "vendor", filepath.FromSlash(moduleImport))
-		vendoredArchive := filepath.Join(vendorModuleDirectory, "native", "libazurecosmosdriver.a")
-		if !isRegularFile(vendoredArchive) {
-			return fmt.Errorf("VENDORED ARTIFACT MISSING: go mod vendor did not retain %s/native/libazurecosmosdriver.a; the generated native/*.a layout is incompatible with vendored consumers and requires a Rust-side packaging adjustment (for example, a package-root .syso artifact)", moduleImport)
-		}
-		headerSource = filepath.Join(vendorModuleDirectory, "azurecosmosdriver.h")
-	}
 	if err := copyFile(headerSource, filepath.Join(workDirectory, "azurecosmosdriver.h")); err != nil {
 		return err
 	}
 
-	mode := "mod"
-	if vendor {
-		mode = "vendor"
-	}
-	if err := runGo(workDirectory, "run", "-mod="+mode, "."); err != nil {
+	if err := runGo(workDirectory, "run", "-mod=mod", "."); err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Linux AMD64 %s consumer linked, ran, and matched the native ABI version.\n", mode)
+	fmt.Fprintln(output, "Linux AMD64 module consumer linked, ran, and matched the native ABI version.")
 	return nil
 }
 

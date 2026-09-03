@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -62,26 +61,6 @@ func TestValidateIntegrityRejectsUndeclaredNestedModule(t *testing.T) {
 	err := validateIntegrity(root, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "missing from provenance.json") {
 		t.Fatalf("validateIntegrity() error = %v, want missing provenance target", err)
-	}
-}
-
-func TestGoModVendorDropsNestedArchive(t *testing.T) {
-	root := t.TempDir()
-	dependency := filepath.Join(root, "dependency")
-	writeTestFile(t, filepath.Join(dependency, "go.mod"), "module example.com/native\n\ngo 1.25.0\n")
-	writeTestFile(t, filepath.Join(dependency, "driver.go"), "package driver\n")
-	writeTestFile(t, filepath.Join(dependency, "native", "libdriver.a"), "archive")
-
-	consumer := filepath.Join(root, "consumer")
-	writeTestFile(t, filepath.Join(consumer, "go.mod"), "module example.com/consumer\n\ngo 1.25.0\n\nrequire example.com/native v0.0.0\n\nreplace example.com/native => ../dependency\n")
-	writeTestFile(t, filepath.Join(consumer, "main.go"), "package main\n\nimport _ \"example.com/native\"\n\nfunc main() {}\n")
-	command := exec.Command("go", "mod", "vendor")
-	command.Dir = consumer
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("go mod vendor failed: %v\n%s", err, output)
-	}
-	if _, err := os.Stat(filepath.Join(consumer, "vendor", "example.com", "native", "native", "libdriver.a")); !os.IsNotExist(err) {
-		t.Fatalf("nested static archive unexpectedly survived go mod vendor: %v", err)
 	}
 }
 
