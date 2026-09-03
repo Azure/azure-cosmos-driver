@@ -427,3 +427,9 @@ FodyWeavers.xsd
 *.msix
 *.msm
 *.msp
+
+# Per-target native driver modules (<GOOS>/<GOARCH>/). The Visual Studio
+# template above ignores ARM/, ARM64/ and WIN32/ as build-output directories,
+# which would otherwise silently swallow darwin/arm64 and future arm targets.
+!/*/arm64/
+!/*/arm/
