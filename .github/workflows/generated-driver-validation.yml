@@ -29,6 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@v6
         with:
@@ -37,7 +38,7 @@ jobs:
       - name: Test validator
         run: go test ./eng/validate-generated-driver/main.go ./eng/validate-generated-driver/main_test.go
       - name: Validate generated tree
-        run: go run ./eng/validate-generated-driver/main.go integrity
+        run: go run ./eng/validate-generated-driver/main.go integrity -base-ref "${{ github.event.pull_request.base.sha }}"
 
   native-smoke:
     name: Linux AMD64 ABI smoke

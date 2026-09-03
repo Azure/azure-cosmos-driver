@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -69,6 +70,58 @@ func TestValidateIntegrityRejectsUndeclaredNestedModule(t *testing.T) {
 	err := validateIntegrity(root, io.Discard)
 	if err == nil || !strings.Contains(err.Error(), "missing from provenance.json") {
 		t.Fatalf("validateIntegrity() error = %v, want missing provenance target", err)
+	}
+}
+
+func TestValidateIntegrityRejectsUnexpectedGeneratedFile(t *testing.T) {
+	root := writeFixture(t)
+	writeTestFile(t, filepath.Join(root, "linux", "amd64", "README.md"), "unexpected")
+	err := validateIntegrity(root, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "unexpected file under generated platform roots") {
+		t.Fatalf("validateIntegrity() error = %v, want unexpected generated file", err)
+	}
+}
+
+func TestValidateIntegrityAgainstBaseRejectsReleaseDeletion(t *testing.T) {
+	root := writeFixture(t)
+	commitFixture(t, root)
+	if err := validateIntegrityAgainstBase(root, "HEAD", io.Discard); err != nil {
+		t.Fatalf("validateIntegrityAgainstBase() before deletion error = %v", err)
+	}
+	if err := os.RemoveAll(filepath.Join(root, "linux")); err != nil {
+		t.Fatal(err)
+	}
+	for _, filename := range []string{"provenance.json", "SHA256SUMS"} {
+		if err := os.Remove(filepath.Join(root, filename)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := validateIntegrityAgainstBase(root, "HEAD", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "generated release cannot be deleted") {
+		t.Fatalf("validateIntegrityAgainstBase() error = %v, want release deletion failure", err)
+	}
+}
+
+func TestValidateIntegrityAgainstBaseRejectsPublishedTargetRemoval(t *testing.T) {
+	root := writeMatrixFixture(t)
+	commitFixture(t, root)
+	base := readTestProvenance(t, root)
+	removed := base.Targets[len(base.Targets)-1]
+	current := base
+	current.Targets = append([]provenanceTarget(nil), base.Targets[:len(base.Targets)-1]...)
+	writeTestJSON(t, filepath.Join(root, "provenance.json"), current)
+	if err := os.RemoveAll(filepath.Join(root, filepath.FromSlash(removed.ModulePath))); err != nil {
+		t.Fatal(err)
+	}
+	var checksums strings.Builder
+	for _, target := range current.Targets {
+		fmt.Fprintf(&checksums, "%s  %s/native/libazurecosmosdriver.a\n", target.StaticLibrarySHA256, target.ModulePath)
+	}
+	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
+
+	err := validateIntegrityAgainstBase(root, "HEAD", io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "previously published target") {
+		t.Fatalf("validateIntegrityAgainstBase() error = %v, want published target removal failure", err)
 	}
 }
 
@@ -212,6 +265,21 @@ func writeTestFile(t *testing.T, filename, contents string) {
 	}
 	if err := os.WriteFile(filename, []byte(contents), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func commitFixture(t *testing.T, root string) {
+	t.Helper()
+	for _, arguments := range [][]string{
+		{"init", "--quiet"},
+		{"add", "."},
+		{"-c", "user.name=Validator Test", "-c", "user.email=validator@example.invalid", "commit", "--quiet", "-m", "fixture"},
+	} {
+		command := exec.Command("git", arguments...)
+		command.Dir = root
+		if output, err := command.CombinedOutput(); err != nil {
+			t.Fatalf("git %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
+		}
 	}
 }
 

@@ -45,7 +45,8 @@ runtime native-driver version with the committed header version. This smoke test
 module replacement semantics, matching module-cache/proxy consumption without vendoring. The
 repository's `.gitignore`
 explicitly preserves generated `arm64` target directories that the inherited Visual Studio rules
-would otherwise omit.
+would otherwise omit. Validation also rejects undeclared files under the generated platform roots
+and prevents a pull request from deleting or removing targets already published on its base branch.
 
 Run the checks locally with:
 

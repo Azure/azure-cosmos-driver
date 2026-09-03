@@ -65,6 +65,7 @@ func main() {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	root := flags.String("root", ".", "repository root")
+	baseRef := flags.String("base-ref", "", "Git base revision used to prevent removal of published targets")
 	if err := flags.Parse(os.Args[2:]); err != nil {
 		exitError(err)
 	}
@@ -72,7 +73,7 @@ func main() {
 	var err error
 	switch command {
 	case "integrity":
-		err = validateIntegrity(*root, os.Stdout)
+		err = validateIntegrityAgainstBase(*root, *baseRef, os.Stdout)
 	case "native-smoke":
 		err = validateNativeSmoke(*root, os.Stdout)
 	default:
@@ -89,11 +90,22 @@ func exitError(err error) {
 }
 
 func validateIntegrity(root string, output io.Writer) error {
+	return validateIntegrityAgainstBase(root, "", output)
+}
+
+func validateIntegrityAgainstBase(root, baseRef string, output io.Writer) error {
 	repo, empty, err := loadRepository(root)
 	if err != nil {
 		return err
 	}
+	baseProvenance, hasBaseProvenance, err := readProvenanceAtRef(repo.root, baseRef)
+	if err != nil {
+		return err
+	}
 	if empty {
+		if hasBaseProvenance {
+			return errors.New("generated release cannot be deleted after it has been published on the base branch")
+		}
 		fmt.Fprintln(output, "No generated Go modules or release manifests are present; integrity validation has nothing to check.")
 		return nil
 	}
@@ -134,6 +146,12 @@ func validateIntegrity(root string, output io.Writer) error {
 		}
 	}
 
+	if hasBaseProvenance {
+		if err := validateContinuity(baseProvenance, repo.provenance); err != nil {
+			return err
+		}
+	}
+
 	moduleSet := make(map[string]struct{}, len(repo.modules))
 	for _, modulePath := range repo.modules {
 		moduleSet[modulePath] = struct{}{}
@@ -149,6 +167,9 @@ func validateIntegrity(root string, output io.Writer) error {
 		if _, exists := moduleSet[modulePath]; !exists {
 			return fmt.Errorf("provenance target module %q has no go.mod", modulePath)
 		}
+	}
+	if err := validateGeneratedLayout(repo.root, repo.provenance.Targets); err != nil {
+		return err
 	}
 
 	if err := validateChecksums(repo); err != nil {
@@ -188,6 +209,32 @@ func loadRepository(root string) (repository, bool, error) {
 		return repository{}, false, err
 	}
 	return repository{root: absoluteRoot, provenance: manifest, modules: modules}, false, nil
+}
+
+func readProvenanceAtRef(root, ref string) (provenance, bool, error) {
+	if ref == "" {
+		return provenance{}, false, nil
+	}
+
+	command := exec.Command("git", "-C", root, "ls-tree", "-r", "--name-only", ref, "--", "provenance.json")
+	output, err := command.CombinedOutput()
+	if err != nil {
+		return provenance{}, false, fmt.Errorf("inspect provenance.json at base ref %q: %w\n%s", ref, err, output)
+	}
+	if strings.TrimSpace(string(output)) == "" {
+		return provenance{}, false, nil
+	}
+
+	command = exec.Command("git", "-C", root, "show", ref+":provenance.json")
+	output, err = command.CombinedOutput()
+	if err != nil {
+		return provenance{}, false, fmt.Errorf("read provenance.json at base ref %q: %w\n%s", ref, err, output)
+	}
+	manifest, err := decodeProvenance(bytes.NewReader(output))
+	if err != nil {
+		return provenance{}, false, fmt.Errorf("parse provenance.json at base ref %q: %w", ref, err)
+	}
+	return manifest, true, nil
 }
 
 func discoverModules(root string) ([]string, error) {
@@ -238,14 +285,22 @@ func readProvenance(filename string) (provenance, error) {
 	}
 	defer file.Close()
 
-	decoder := json.NewDecoder(file)
+	manifest, err := decodeProvenance(file)
+	if err != nil {
+		return provenance{}, fmt.Errorf("parse provenance.json: %w", err)
+	}
+	return manifest, nil
+}
+
+func decodeProvenance(reader io.Reader) (provenance, error) {
+	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	var manifest provenance
 	if err := decoder.Decode(&manifest); err != nil {
-		return provenance{}, fmt.Errorf("parse provenance.json: %w", err)
+		return provenance{}, err
 	}
 	if err := ensureJSONEnd(decoder); err != nil {
-		return provenance{}, fmt.Errorf("parse provenance.json: %w", err)
+		return provenance{}, err
 	}
 	if manifest.SchemaVersion != 1 {
 		return provenance{}, fmt.Errorf("unsupported provenance schema_version %d", manifest.SchemaVersion)
@@ -268,6 +323,26 @@ func readProvenance(filename string) (provenance, error) {
 	return manifest, nil
 }
 
+func validateContinuity(base, current provenance) error {
+	currentTargets := make(map[string]provenanceTarget, len(current.Targets))
+	for _, target := range current.Targets {
+		currentTargets[target.ID] = target
+	}
+	for _, baseTarget := range base.Targets {
+		currentTarget, exists := currentTargets[baseTarget.ID]
+		if !exists {
+			return fmt.Errorf("previously published target %q cannot be removed", baseTarget.ID)
+		}
+		if currentTarget.ModulePath != baseTarget.ModulePath {
+			return fmt.Errorf("previously published target %q module path cannot change from %q to %q", baseTarget.ID, baseTarget.ModulePath, currentTarget.ModulePath)
+		}
+		if currentTarget.Triple != baseTarget.Triple {
+			return fmt.Errorf("previously published target %q triple cannot change from %q to %q", baseTarget.ID, baseTarget.Triple, currentTarget.Triple)
+		}
+	}
+	return nil
+}
+
 func ensureJSONEnd(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -280,18 +355,73 @@ func ensureJSONEnd(decoder *json.Decoder) error {
 }
 
 func validateModulePath(modulePath string) error {
+	parts := strings.Split(modulePath, "/")
 	if modulePath == "" ||
 		strings.Contains(modulePath, `\`) ||
 		path.IsAbs(modulePath) ||
 		path.Clean(modulePath) != modulePath ||
-		strings.HasPrefix(modulePath, "../") {
+		strings.HasPrefix(modulePath, "../") ||
+		len(parts) != 2 ||
+		parts[1] == "" {
 		return fmt.Errorf("unsafe module_path %q", modulePath)
 	}
-	first, _, _ := strings.Cut(modulePath, "/")
-	switch first {
+	switch parts[0] {
 	case "windows", "linux", "darwin":
 	default:
 		return fmt.Errorf("module_path %q is outside the expected platform roots", modulePath)
+	}
+	return nil
+}
+
+func validateGeneratedLayout(root string, targets []provenanceTarget) error {
+	expected := make(map[string]struct{}, len(targets)*5)
+	for _, target := range targets {
+		parts := strings.Split(target.ModulePath, "/")
+		goarch, _, _ := strings.Cut(parts[1], "-")
+		for _, relative := range []string{
+			path.Join(target.ModulePath, "go.mod"),
+			path.Join(target.ModulePath, fmt.Sprintf("link_%s_%s.go", parts[0], goarch)),
+			path.Join(target.ModulePath, "azurecosmosdriver.h"),
+			path.Join(target.ModulePath, "native", "azurecosmosdriver.h"),
+			path.Join(target.ModulePath, "native", "libazurecosmosdriver.a"),
+		} {
+			expected[relative] = struct{}{}
+		}
+	}
+
+	for _, platform := range []string{"windows", "linux", "darwin"} {
+		platformRoot := filepath.Join(root, platform)
+		if _, err := os.Lstat(platformRoot); errors.Is(err, os.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return fmt.Errorf("inspect generated root %q: %w", platform, err)
+		}
+		err := filepath.WalkDir(platformRoot, func(current string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			relative, err := filepath.Rel(root, current)
+			if err != nil {
+				return err
+			}
+			relative = filepath.ToSlash(relative)
+			if entry.Type()&os.ModeSymlink != 0 {
+				return fmt.Errorf("generated path is a symbolic link: %q", relative)
+			}
+			if entry.IsDir() {
+				return nil
+			}
+			if !entry.Type().IsRegular() {
+				return fmt.Errorf("generated path is not a regular file: %q", relative)
+			}
+			if _, allowed := expected[relative]; !allowed {
+				return fmt.Errorf("unexpected file under generated platform roots: %q", relative)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
