@@ -34,7 +34,8 @@ Retains the work directory after a successful rehearsal.
 
 .PARAMETER SelfTest
 Runs fixture checks for uppercase proxy path escaping, escaped version file
-names, and ZIP entry structure without building the native consumer.
+names, ZIP entry structure, and cleanup/evidence safety without building the
+native consumer.
 
 .EXAMPLE
 pwsh eng/scripts/Test-LocalGoModuleProxy.ps1 `
@@ -72,6 +73,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if (-not $IsWindows) {
+    throw 'This acceptance rehearsal requires Windows.'
+}
 
 $expectedModulePath = 'github.com/Azure/azure-cosmos-driver/windows/amd64'
 $repositoryRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\..'))
@@ -271,7 +276,7 @@ function Get-SourceFiles {
     })
 }
 
-function Get-ModuleTreeEvidence {
+function Get-SourceSnapshot {
     param(
         [Parameter(Mandatory = $true)]
         [string]$Root,
@@ -283,17 +288,13 @@ function Get-ModuleTreeEvidence {
     $entries = @(
         foreach ($file in $Files) {
             $relativePath = [IO.Path]::GetRelativePath($Root, $file.FullName).Replace('\', '/')
-            [ordered]@{
-                path = $relativePath
-                size = $file.Length
-                sha256 = Get-FileSha256 $file.FullName
-            }
+            "$(Get-FileSha256 $file.FullName)  $($file.Length)  $relativePath"
         }
     )
-    $manifestText = (($entries | ForEach-Object { "$($_.sha256)  $($_.path)" }) -join "`n") + "`n"
+    $manifestText = ($entries -join "`n") + "`n"
     [ordered]@{
         sha256 = Get-Sha256Text $manifestText
-        files = $entries
+        fileCount = $Files.Count
     }
 }
 
@@ -642,28 +643,7 @@ function Get-IsolatedEnvironment {
     }
 }
 
-function Get-OptionalProvenance {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$ModuleRoot
-    )
-
-    $directory = [IO.DirectoryInfo]::new($ModuleRoot)
-    for ($depth = 0; $depth -le 3 -and $null -ne $directory; $depth++) {
-        $candidate = Join-Path $directory.FullName 'provenance.json'
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            return [ordered]@{
-                path = $candidate
-                sha256 = Get-FileSha256 $candidate
-                content = Get-Content -LiteralPath $candidate -Raw | ConvertFrom-Json
-            }
-        }
-        $directory = $directory.Parent
-    }
-    $null
-}
-
-function Get-GitProvenance {
+function Get-GitSourceInfo {
     param(
         [Parameter(Mandatory = $true)]
         [string]$ModuleRoot,
@@ -784,7 +764,7 @@ function Test-AvoidableMinGwRuntime {
     )
 
     $normalized = $Dependency.ToLowerInvariant()
-    $normalized -match '^libgcc_s_.+-1\.dll$' -or $normalized -in @(
+    $normalized -match '^libgcc_s(?:_.+)?-1\.dll$' -or $normalized -in @(
         'libssp-0.dll'
         'libstdc++-6.dll'
         'libwinpthread-1.dll'
@@ -845,6 +825,8 @@ function Invoke-SelfTest {
         Write-Utf8File (Join-Path $fixtureRoot 'nested' 'fixture.txt') "fixture`n"
 
         $sourceFiles = @(Get-SourceFiles $fixtureRoot)
+        $sourceSnapshot = Get-SourceSnapshot $fixtureRoot $sourceFiles
+        Assert-Condition ($sourceSnapshot.fileCount -eq 3) 'Source snapshot file count is invalid.'
         $proxy = New-LocalGoProxy $fixtureRoot $sourceFiles $fixtureModulePath $fixtureVersion $proxyRoot
         Assert-Condition ($proxy.escapedModulePath -ceq 'github.com/!azure/!proxy!fixture/windows/amd64') 'Uppercase module path escaping failed.'
         Assert-Condition ($proxy.escapedVersion -ceq 'v1.2.3-!preview.1') 'Uppercase version escaping failed.'
@@ -885,7 +867,9 @@ function Invoke-SelfTest {
         Assert-Condition ((Get-Sha256Text 'abc') -ceq 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad') 'SHA256 text hashing failed.'
         Assert-Condition ((Format-GoToolCommand 'C:\Program Files\gcc.exe') -ceq '"C:\Program Files\gcc.exe"') 'Go tool path quoting failed.'
         Assert-Condition (Test-AvoidableMinGwRuntime 'libgcc_s_sjlj-1.dll') 'SJLJ libgcc runtime detection failed.'
-        Assert-Condition (Test-AvoidableMinGwRuntime 'libgcc_s_custom-1.dll') 'Generic libgcc runtime detection failed.'
+        Assert-Condition (Test-AvoidableMinGwRuntime 'libgcc_s-1.dll') 'Generic libgcc runtime detection failed.'
+        Assert-Condition (Test-AvoidableMinGwRuntime 'libgcc_s_dw2-1.dll') 'DW2 libgcc runtime detection failed.'
+        Assert-Condition (Test-AvoidableMinGwRuntime 'libgcc_s_seh-1.dll') 'SEH libgcc runtime detection failed.'
         Assert-Condition (-not (Test-AvoidableMinGwRuntime 'kernel32.dll')) 'Windows system DLL was incorrectly classified as avoidable.'
         $separatorProxyUri = ConvertTo-FileProxyUri (Join-Path $selfTestRoot 'proxy,backup')
         Assert-Condition ($separatorProxyUri.Contains('%2C')) 'File proxy URI did not escape a Go proxy-list separator.'
@@ -922,7 +906,7 @@ New-Item -ItemType Directory -Path $proxyRoot, $consumerRoot -Force | Out-Null
 
 $commands = [Collections.Generic.List[object]]::new()
 $evidence = [ordered]@{
-    schemaVersion = 1
+    schemaVersion = 2
     status = 'running'
     startedUtc = (Get-Date).ToUniversalTime().ToString('o')
     module = [ordered]@{
@@ -938,16 +922,15 @@ $failure = $null
 
 try {
     $sourceFiles = @(Get-SourceFiles $moduleRoot)
-    $sourceTree = Get-ModuleTreeEvidence $moduleRoot $sourceFiles
-    $evidence.module['sourceTree'] = $sourceTree
-    $evidence.module['provenance'] = Get-OptionalProvenance $moduleRoot
-    $evidence.module['git'] = Get-GitProvenance $moduleRoot $commands
+    $sourceSnapshot = Get-SourceSnapshot $moduleRoot $sourceFiles
+    $evidence.module['sourceSnapshot'] = $sourceSnapshot
+    $evidence.module['git'] = Get-GitSourceInfo $moduleRoot $commands
 
     $proxy = New-LocalGoProxy $moduleRoot $sourceFiles $modulePath $Version $proxyRoot
     $evidence['proxy'] = $proxy
     $stableSourceFiles = @(Get-SourceFiles $moduleRoot)
-    $stableSourceTree = Get-ModuleTreeEvidence $moduleRoot $stableSourceFiles
-    Assert-Condition ($sourceTree.sha256 -ceq $stableSourceTree.sha256) 'Module source changed while the proxy ZIP was being constructed; rerun against a stable source directory.'
+    $stableSourceSnapshot = Get-SourceSnapshot $moduleRoot $stableSourceFiles
+    Assert-Condition ($sourceSnapshot.sha256 -ceq $stableSourceSnapshot.sha256) 'Module source changed while the proxy ZIP was being constructed; rerun against a stable source directory.'
 
     $goPath = Resolve-Application $GoExecutable 'Go executable'
     $compilerPath = Resolve-Application $CCompiler 'C compiler'
