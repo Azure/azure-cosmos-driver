@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "source_commit": "85c4e1e01ee0b4c2dfdf9533dcad192b626af06d",
+  "native_interface_crate": "azure_data_cosmos_driver_native",
+  "native_interface_version": "0.1.0",
+  "rust_driver_crate": "azure_data_cosmos_driver",
+  "rust_driver_version": "0.7.0",
+  "targets": [
+    {
+      "id": "windows-amd64",
+      "triple": "x86_64-pc-windows-gnu",
+      "module_path": "windows/amd64",
+      "static_library_sha256": "c99d472cd52ab2f3d40e10e26150afd97d67d9cb7024115a4bf4335e795d3466",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    },
+    {
+      "id": "linux-amd64-glibc",
+      "triple": "x86_64-unknown-linux-gnu",
+      "module_path": "linux/amd64",
+      "static_library_sha256": "a096998eb7784e569fd3a6c1b18fa8e83dd30785103d3fba4b69056f0a08b28d",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    },
+    {
+      "id": "linux-arm64-glibc",
+      "triple": "aarch64-unknown-linux-gnu",
+      "module_path": "linux/arm64",
+      "static_library_sha256": "72cbfd4553fd2757db5e6a2aee32c00633e3627be67607963bf714c966dacc03",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    },
+    {
+      "id": "darwin-arm64",
+      "triple": "aarch64-apple-darwin",
+      "module_path": "darwin/arm64",
+      "static_library_sha256": "190fd109529f71b72dcfdf85deff6c7fe324e7f44d9fe082dc7fdcf593bb1fd9",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    },
+    {
+      "id": "linux-amd64-musl",
+      "triple": "x86_64-unknown-linux-musl",
+      "module_path": "linux/amd64-musl",
+      "static_library_sha256": "fd75dabcc87dda221e78ffc01ceeecd80f0b950eeebf32642d9dcc770b10b985",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    },
+    {
+      "id": "linux-arm64-musl",
+      "triple": "aarch64-unknown-linux-musl",
+      "module_path": "linux/arm64-musl",
+      "static_library_sha256": "2e72bbfdea514e7833675d2d4fda9b5ae788a2ec1a3cd7cf58d78d1318acfcdc",
+      "header_sha256": "019f4604f08bfb76aca3e0e3aa1eba10d95f97361788a1aa31c379b30c44d38c"
+    }
+  ]
+}
