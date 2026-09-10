@@ -281,12 +281,7 @@ func TestValidateReleaseContractRejectsInconsistentVersions(t *testing.T) {
 func TestBuildReleasePlanUsesPRBaseForContinuity(t *testing.T) {
 	t.Parallel()
 	root := writeContractFixture(t, "0.1.0")
-	runner := &gitAndValidatorRunner{
-		root:          root,
-		mergeSHA:      testMergeSHA,
-		baseSHA:       testBaseSHA,
-		remoteBaseSHA: "5555555555555555555555555555555555555555",
-	}
+	runner := newGitAndValidatorRunner(root)
 	tags := staticTagReader{resolutions: absentTagResolutions("0.1.0")}
 	plan, err := buildReleasePlan(context.Background(), planOptions{
 		Root:          root,
@@ -303,6 +298,159 @@ func TestBuildReleasePlanUsesPRBaseForContinuity(t *testing.T) {
 	wantArguments := []string{"integrity", "-root", root, "-base-ref", testBaseSHA}
 	if !reflect.DeepEqual(runner.validatorArguments, wantArguments) {
 		t.Fatalf("validator arguments = %v, want %v", runner.validatorArguments, wantArguments)
+	}
+}
+
+func TestBuildReleasePlanRejectsInvalidCandidateGitState(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		configure func(*gitAndValidatorRunner)
+		want      string
+	}{
+		{
+			name: "candidate HEAD differs from merge SHA",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.headSHA = testTagSHA
+			},
+			want: "candidate HEAD is " + testTagSHA + ", expected derived merge SHA " + testMergeSHA,
+		},
+		{
+			name: "merge SHA is absent or not a commit",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.failGitCommand(
+					"cat-file -e "+testMergeSHA+"^{commit}",
+					errors.New("merge object is unavailable"),
+				)
+			},
+			want: "derived merge SHA is not a commit",
+		},
+		{
+			name: "base SHA is absent or not a commit",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.failGitCommand(
+					"cat-file -e "+testBaseSHA+"^{commit}",
+					errors.New("base object is unavailable"),
+				)
+			},
+			want: "pull request base SHA is not a commit",
+		},
+		{
+			name: "base SHA is not an ancestor of merge SHA",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.failGitCommand(
+					"merge-base --is-ancestor "+testBaseSHA+" "+testMergeSHA,
+					errors.New("not an ancestor"),
+				)
+			},
+			want: "pull request base SHA is not an ancestor of the derived merge commit",
+		},
+		{
+			name: "origin default branch is missing",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.failGitCommand(
+					"rev-parse --verify refs/remotes/origin/main^{commit}",
+					errors.New("remote ref is unavailable"),
+				)
+			},
+			want: "current remote default branch is unavailable",
+		},
+		{
+			name: "merge SHA is not reachable from origin default branch",
+			configure: func(runner *gitAndValidatorRunner) {
+				runner.failGitCommand(
+					"merge-base --is-ancestor "+testMergeSHA+" refs/remotes/origin/main",
+					errors.New("merge is not reachable"),
+				)
+			},
+			want: `derived merge SHA is not reachable from current remote default branch "main"`,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeContractFixture(t, "0.1.0")
+			runner := newGitAndValidatorRunner(root)
+			test.configure(runner)
+
+			plan, err := buildReleasePlan(context.Background(), planOptions{
+				Root:          root,
+				Repository:    "Azure/azure-cosmos-driver",
+				Version:       "0.1.0",
+				ValidatorPath: "trusted-validator",
+			}, testPullRequest(), runner, staticTagReader{
+				resolutions: absentTagResolutions("0.1.0"),
+			})
+
+			if err == nil {
+				t.Fatal("buildReleasePlan() error = nil, want candidate Git-state failure")
+			}
+			if plan.Status != "blocked" {
+				t.Fatalf("buildReleasePlan() status = %q, want blocked", plan.Status)
+			}
+			if len(plan.Reasons) != 1 || !strings.Contains(plan.Reasons[0], test.want) {
+				t.Fatalf("buildReleasePlan() reasons = %v, want %q", plan.Reasons, test.want)
+			}
+			if len(runner.validatorArguments) != 0 {
+				t.Fatalf("validator ran after candidate Git-state failure with arguments %v", runner.validatorArguments)
+			}
+		})
+	}
+}
+
+func TestRunPlanCommandWritesBlockedPlanForCandidateHEADMismatch(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	metadataPath := filepath.Join(root, "pr-metadata.json")
+	planPath := filepath.Join(root, "release-plan.json")
+	summaryPath := filepath.Join(root, "summary.md")
+	outputPath := filepath.Join(root, "github-output")
+	writeJSONForTest(t, metadataPath, testPullRequest())
+	writeFileForTest(t, outputPath, "")
+
+	runner := newGitAndValidatorRunner(root)
+	runner.headSHA = testTagSHA
+	err := runPlanCommand(context.Background(), []string{
+		"-root", root,
+		"-repository", "Azure/azure-cosmos-driver",
+		"-version", "0.1.0",
+		"-pr-metadata", metadataPath,
+		"-validator", "trusted-validator",
+		"-output", planPath,
+		"-summary", summaryPath,
+		"-github-output", outputPath,
+	}, runner)
+	if err == nil {
+		t.Fatal("runPlanCommand() error = nil, want non-zero candidate HEAD mismatch")
+	}
+
+	contents, readErr := os.ReadFile(planPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var plan releasePlan
+	if err := json.Unmarshal(contents, &plan); err != nil {
+		t.Fatal(err)
+	}
+	wantReason := "candidate HEAD is " + testTagSHA + ", expected derived merge SHA " + testMergeSHA
+	if plan.Status != "blocked" || len(plan.Reasons) != 1 || !strings.Contains(plan.Reasons[0], wantReason) {
+		t.Fatalf("blocked plan = %#v, want reason containing %q", plan, wantReason)
+	}
+
+	summary, readErr := os.ReadFile(summaryPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(summary), "`blocked`") || !strings.Contains(string(summary), wantReason) {
+		t.Fatalf("summary = %q, want blocked status and candidate HEAD mismatch", summary)
+	}
+
+	outputs, readErr := os.ReadFile(outputPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !strings.Contains(string(outputs), "status=blocked\n") {
+		t.Fatalf("GitHub outputs = %q, want blocked status", outputs)
 	}
 }
 
@@ -445,10 +593,27 @@ func (runner *scriptedRunner) Run(
 
 type gitAndValidatorRunner struct {
 	root               string
+	headSHA            string
 	mergeSHA           string
 	baseSHA            string
 	remoteBaseSHA      string
+	gitFailures        map[string]error
 	validatorArguments []string
+}
+
+func newGitAndValidatorRunner(root string) *gitAndValidatorRunner {
+	return &gitAndValidatorRunner{
+		root:          root,
+		headSHA:       testMergeSHA,
+		mergeSHA:      testMergeSHA,
+		baseSHA:       testBaseSHA,
+		remoteBaseSHA: "5555555555555555555555555555555555555555",
+		gitFailures:   make(map[string]error),
+	}
+}
+
+func (runner *gitAndValidatorRunner) failGitCommand(command string, err error) {
+	runner.gitFailures[command] = err
 }
 
 func (runner *gitAndValidatorRunner) Run(
@@ -466,9 +631,12 @@ func (runner *gitAndValidatorRunner) Run(
 	}
 	gitArguments := arguments[2:]
 	joined := strings.Join(gitArguments, " ")
+	if err := runner.gitFailures[joined]; err != nil {
+		return nil, err
+	}
 	switch {
 	case joined == "rev-parse --verify HEAD^{commit}":
-		return []byte(runner.mergeSHA + "\n"), nil
+		return []byte(runner.headSHA + "\n"), nil
 	case joined == "cat-file -e "+runner.mergeSHA+"^{commit}":
 		return nil, nil
 	case joined == "cat-file -e "+runner.baseSHA+"^{commit}":
