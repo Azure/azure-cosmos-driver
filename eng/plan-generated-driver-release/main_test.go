@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -186,6 +187,42 @@ func TestGitHubClientDereferencesAnnotatedTag(t *testing.T) {
 	}
 	if resolution.Kind != "annotated" || resolution.ResolvedCommit != testMergeSHA {
 		t.Fatalf("Lookup() = %#v, want annotated tag at merge SHA", resolution)
+	}
+}
+
+func TestGitHubClientRecursivelyDereferencesAnnotatedTag(t *testing.T) {
+	t.Parallel()
+	nestedTagSHA := "5555555555555555555555555555555555555555"
+	runner := &scriptedRunner{responses: []scriptedResponse{
+		{
+			name:     "gh",
+			contains: "git/matching-refs/tags/linux/amd64/v0.1.0",
+			output: fmt.Sprintf(
+				`[{"ref":"refs/tags/linux/amd64/v0.1.0","object":{"sha":"%s","type":"tag"}}]`,
+				testTagSHA,
+			),
+		},
+		{
+			name:     "gh",
+			contains: "git/tags/" + testTagSHA,
+			output:   fmt.Sprintf(`{"object":{"sha":"%s","type":"tag"}}`, nestedTagSHA),
+		},
+		{
+			name:     "gh",
+			contains: "git/tags/" + nestedTagSHA,
+			output:   fmt.Sprintf(`{"object":{"sha":"%s","type":"commit"}}`, testMergeSHA),
+		},
+	}}
+	resolution, err := (githubClient{runner: runner}).Lookup(
+		context.Background(),
+		"Azure/azure-cosmos-driver",
+		"linux/amd64/v0.1.0",
+	)
+	if err != nil {
+		t.Fatalf("Lookup() error = %v", err)
+	}
+	if resolution.Kind != "annotated" || resolution.ResolvedCommit != testMergeSHA {
+		t.Fatalf("Lookup() = %#v, want recursively peeled annotated tag at merge SHA", resolution)
 	}
 }
 
@@ -454,6 +491,357 @@ func TestRunPlanCommandWritesBlockedPlanForCandidateHEADMismatch(t *testing.T) {
 	}
 }
 
+func TestPublishReleaseCreatesSixAnnotatedTagsWithOneAtomicPush(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	digest := mustPlanDigest(t, approved)
+	runner := newGitAndValidatorRunner(root)
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+		targetTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, digest, runner, tags)
+	if err != nil {
+		t.Fatalf("publishRelease() error = %v", err)
+	}
+	if result.Status != "published" || !result.PushAttempted || !result.AtomicPush {
+		t.Fatalf("publishRelease() result = %#v", result)
+	}
+	if len(runner.tagCommands) != len(expectedModulePaths) {
+		t.Fatalf("annotated tag commands = %d, want %d", len(runner.tagCommands), len(expectedModulePaths))
+	}
+	for index, command := range runner.tagCommands {
+		modulePath := expectedModulePaths[index]
+		tag := modulePath + "/v0.1.0"
+		assertContainsArguments(t, command, "--annotate", "--no-sign", "--message", tag, testMergeSHA)
+		message := command[4]
+		for _, text := range []string{
+			"Module: " + modulePath,
+			"Version: 0.1.0",
+			"Driver merge SHA: " + testMergeSHA,
+			"Upstream source SHA: " + testSourceSHA,
+			"Native interface version: 0.1.0",
+			"Rust implementation version: 0.8.0",
+		} {
+			if !strings.Contains(message, text) {
+				t.Fatalf("tag message %q does not contain %q", message, text)
+			}
+		}
+	}
+	if len(runner.pushCommands) != 1 {
+		t.Fatalf("push commands = %v, want exactly one", runner.pushCommands)
+	}
+	wantPush := []string{"push", "--atomic", "origin"}
+	for _, modulePath := range expectedModulePaths {
+		ref := "refs/tags/" + modulePath + "/v0.1.0"
+		wantPush = append(wantPush, ref+":"+ref)
+	}
+	if !reflect.DeepEqual(runner.pushCommands[0], wantPush) {
+		t.Fatalf("atomic push argv = %v, want %v", runner.pushCommands[0], wantPush)
+	}
+}
+
+func TestPublishReleaseAlreadyPublishedIsNoOp(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	targets := targetTagResolutions("0.1.0")
+	approved := testReleasePlan("already_published", targets)
+	runner := newGitAndValidatorRunner(root)
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{targets, targets}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err != nil {
+		t.Fatalf("publishRelease() error = %v", err)
+	}
+	if result.Status != "already_published" || result.PushAttempted {
+		t.Fatalf("publishRelease() result = %#v", result)
+	}
+	assertNoPublicationMutation(t, runner)
+}
+
+func TestPublishReleaseBlocksUnsafePreflightAndFinalStates(t *testing.T) {
+	t.Parallel()
+	partial := absentTagResolutions("0.1.0")
+	partial[expectedModulePaths[0]+"/v0.1.0"] = targetTagResolutions("0.1.0")[expectedModulePaths[0]+"/v0.1.0"]
+	mismatched := absentTagResolutions("0.1.0")
+	mismatched[expectedModulePaths[0]+"/v0.1.0"] = tagResolution{
+		Present:        true,
+		Kind:           "lightweight",
+		ReferenceSHA:   testTagSHA,
+		ResolvedCommit: testTagSHA,
+	}
+	malformed := absentTagResolutions("0.1.0")
+	malformed[expectedModulePaths[0]+"/v0.1.0"] = tagResolution{
+		Present: true,
+		Problem: "unsupported object",
+	}
+
+	for _, test := range []struct {
+		name           string
+		approved       releasePlan
+		finalTags      map[string]tagResolution
+		approvedDigest func(*testing.T, releasePlan) string
+	}{
+		{
+			name:           "blocked preflight",
+			approved:       testReleasePlan("blocked", partial),
+			finalTags:      absentTagResolutions("0.1.0"),
+			approvedDigest: mustPlanDigest,
+		},
+		{
+			name:           "partial final tags",
+			approved:       testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0")),
+			finalTags:      partial,
+			approvedDigest: mustPlanDigest,
+		},
+		{
+			name:           "mismatched final tag",
+			approved:       testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0")),
+			finalTags:      mismatched,
+			approvedDigest: mustPlanDigest,
+		},
+		{
+			name:           "malformed final tag",
+			approved:       testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0")),
+			finalTags:      malformed,
+			approvedDigest: mustPlanDigest,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeContractFixture(t, "0.1.0")
+			runner := newGitAndValidatorRunner(root)
+			tags := &sequenceTagReader{rounds: []map[string]tagResolution{test.finalTags}}
+			result, err := publishRelease(context.Background(), publishOptions{
+				Root:          root,
+				Repository:    "Azure/azure-cosmos-driver",
+				Version:       "0.1.0",
+				ValidatorPath: "trusted-validator",
+				Remote:        "origin",
+			}, testPullRequest(), test.approved, test.approvedDigest(t, test.approved), runner, tags)
+			if err == nil || result.Status != "blocked" {
+				t.Fatalf("publishRelease() result = %#v, error = %v, want blocked", result, err)
+			}
+			assertNoPublicationMutation(t, runner)
+		})
+	}
+}
+
+func TestPublishReleaseBlocksApprovalDrift(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		mutate func(*releasePlan, *pullRequest, *publishOptions, *gitAndValidatorRunner)
+		digest func(*testing.T, releasePlan) string
+	}{
+		{
+			name:   "plan digest",
+			mutate: func(_ *releasePlan, _ *pullRequest, _ *publishOptions, _ *gitAndValidatorRunner) {},
+			digest: func(_ *testing.T, _ releasePlan) string { return strings.Repeat("0", 64) },
+		},
+		{
+			name: "merge SHA",
+			mutate: func(_ *releasePlan, pr *pullRequest, _ *publishOptions, _ *gitAndValidatorRunner) {
+				pr.MergeCommitSHA = testTagSHA
+			},
+			digest: mustPlanDigest,
+		},
+		{
+			name: "version",
+			mutate: func(_ *releasePlan, _ *pullRequest, options *publishOptions, _ *gitAndValidatorRunner) {
+				options.Version = "0.2.0"
+			},
+			digest: mustPlanDigest,
+		},
+		{
+			name: "PR number",
+			mutate: func(_ *releasePlan, pr *pullRequest, _ *publishOptions, _ *gitAndValidatorRunner) {
+				pr.Number = 15
+			},
+			digest: mustPlanDigest,
+		},
+		{
+			name: "default branch tip",
+			mutate: func(_ *releasePlan, _ *pullRequest, _ *publishOptions, runner *gitAndValidatorRunner) {
+				runner.remoteBaseSHA = "6666666666666666666666666666666666666666"
+			},
+			digest: mustPlanDigest,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeContractFixture(t, "0.1.0")
+			approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+			pr := testPullRequest()
+			options := publishOptions{
+				Root:          root,
+				Repository:    "Azure/azure-cosmos-driver",
+				Version:       "0.1.0",
+				ValidatorPath: "trusted-validator",
+				Remote:        "origin",
+			}
+			runner := newGitAndValidatorRunner(root)
+			test.mutate(&approved, &pr, &options, runner)
+			tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+				absentTagResolutions("0.1.0"),
+			}}
+			result, err := publishRelease(
+				context.Background(),
+				options,
+				pr,
+				approved,
+				test.digest(t, approved),
+				runner,
+				tags,
+			)
+			if err == nil || result.Status != "blocked" {
+				t.Fatalf("publishRelease() result = %#v, error = %v, want blocked", result, err)
+			}
+			assertNoPublicationMutation(t, runner)
+		})
+	}
+}
+
+func TestPublishReleaseBlocksLocalTagCollisionBeforeMutation(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	runner := newGitAndValidatorRunner(root)
+	collidingTag := expectedModulePaths[2] + "/v0.1.0"
+	runner.localRefs[collidingTag] = "refs/tags/" + collidingTag
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err == nil || result.Status != "blocked" ||
+		!strings.Contains(strings.Join(result.Reasons, " "), "local tag collision") {
+		t.Fatalf("publishRelease() result = %#v, error = %v", result, err)
+	}
+	assertNoPublicationMutation(t, runner)
+}
+
+func TestPublishReleaseDoesNotFallBackAfterAtomicPushRejection(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	runner := newGitAndValidatorRunner(root)
+	runner.pushErr = errors.New("atomic push rejected")
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+		absentTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err == nil || result.Status != "blocked" || !result.PushAttempted {
+		t.Fatalf("publishRelease() result = %#v, error = %v", result, err)
+	}
+	if len(runner.pushCommands) != 1 || len(runner.pushCommands[0]) < 2 ||
+		runner.pushCommands[0][1] != "--atomic" {
+		t.Fatalf("push commands = %v, want one atomic attempt and no fallback", runner.pushCommands)
+	}
+}
+
+func TestPublishReleaseReportsConcurrentWinnerAfterPushRejectionAsIndeterminate(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	runner := newGitAndValidatorRunner(root)
+	runner.pushErr = errors.New("atomic push rejected")
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+		targetTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err == nil || result.Status != "indeterminate" || !result.PushAttempted {
+		t.Fatalf("publishRelease() result = %#v, error = %v", result, err)
+	}
+	if len(runner.pushCommands) != 1 {
+		t.Fatalf("push commands = %v, want one atomic attempt and no fallback", runner.pushCommands)
+	}
+}
+
+func TestPublishWorkflowIsolatedPermissionsAndEnvironment(t *testing.T) {
+	t.Parallel()
+	contents, err := os.ReadFile(filepath.Join(
+		repositoryRootForTest(t),
+		".github",
+		"workflows",
+		"publish-generated-driver-release.yml",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(contents)
+	for _, required := range []string{
+		"workflow_dispatch:",
+		"group: generated-driver-release",
+		"cancel-in-progress: false",
+		"environment: driver-release",
+		"contents: read",
+		"contents: write",
+		"pull-requests: read",
+		"persist-credentials: false",
+		"persist-credentials: true",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("publication workflow is missing %q", required)
+		}
+	}
+	if strings.Count(workflow, "contents: write") != 1 {
+		t.Fatalf("publication workflow contents:write count = %d, want one isolated job", strings.Count(workflow, "contents: write"))
+	}
+	for _, forbidden := range []string{"pull_request:", "release:", "environment: production"} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("publication workflow unexpectedly contains %q", forbidden)
+		}
+	}
+}
+
+func repositoryRootForTest(t *testing.T) string {
+	t.Helper()
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("resolve test source path")
+	}
+	return filepath.Clean(filepath.Join(filepath.Dir(filename), "..", ".."))
+}
+
 func assertPlanStatus(t *testing.T, resolutions map[string]tagResolution, want string) {
 	t.Helper()
 	modules, status, _ := classifyTags("0.1.0", testMergeSHA, resolutions)
@@ -479,6 +867,85 @@ func absentTagResolutions(version string) map[string]tagResolution {
 		resolutions[modulePath+"/v"+version] = tagResolution{}
 	}
 	return resolutions
+}
+
+func targetTagResolutions(version string) map[string]tagResolution {
+	resolutions := make(map[string]tagResolution, len(expectedModulePaths))
+	for _, modulePath := range expectedModulePaths {
+		tag := modulePath + "/v" + version
+		resolutions[tag] = tagResolution{
+			Present:        true,
+			Kind:           "annotated",
+			ReferenceSHA:   testTagSHA,
+			ResolvedCommit: testMergeSHA,
+		}
+	}
+	return resolutions
+}
+
+func testReleasePlan(status string, resolutions map[string]tagResolution) releasePlan {
+	modules, classifiedStatus, reasons := classifyTags("0.1.0", testMergeSHA, resolutions)
+	if status != "blocked" && classifiedStatus != status {
+		panic(fmt.Sprintf("test plan status %q does not match tag status %q", status, classifiedStatus))
+	}
+	if status == "blocked" {
+		classifiedStatus = status
+	}
+	return releasePlan{
+		SchemaVersion:             planSchemaVersion,
+		Repository:                "Azure/azure-cosmos-driver",
+		SourcePR:                  14,
+		BaseBranch:                "main",
+		BaseSHA:                   testBaseSHA,
+		DerivedMergeSHA:           testMergeSHA,
+		RemoteDefaultBranchSHA:    "5555555555555555555555555555555555555555",
+		IntegrityValidatorBaseRef: testBaseSHA,
+		UpstreamSourceSHA:         testSourceSHA,
+		RequestedVersion:          "0.1.0",
+		NativeInterfaceVersion:    "0.1.0",
+		RustDriverVersion:         "0.8.0",
+		Modules:                   modules,
+		Status:                    classifiedStatus,
+		Reasons:                   reasons,
+	}
+}
+
+func mustPlanDigest(t *testing.T, plan releasePlan) string {
+	t.Helper()
+	digest, err := planDigest(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return digest
+}
+
+func assertContainsArguments(t *testing.T, arguments []string, required ...string) {
+	t.Helper()
+	for _, value := range required {
+		if !containsString(arguments, value) {
+			t.Fatalf("arguments %v do not contain %q", arguments, value)
+		}
+	}
+}
+
+func containsString(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
+}
+
+func assertNoPublicationMutation(t *testing.T, runner *gitAndValidatorRunner) {
+	t.Helper()
+	if len(runner.tagCommands) != 0 || len(runner.pushCommands) != 0 {
+		t.Fatalf(
+			"publication mutation occurred: tag commands=%v push commands=%v",
+			runner.tagCommands,
+			runner.pushCommands,
+		)
+	}
 }
 
 func testPullRequest() pullRequest {
@@ -555,6 +1022,28 @@ type staticTagReader struct {
 	err         error
 }
 
+type sequenceTagReader struct {
+	rounds []map[string]tagResolution
+	calls  int
+}
+
+func (reader *sequenceTagReader) Lookup(
+	_ context.Context,
+	_ string,
+	tag string,
+) (tagResolution, error) {
+	round := reader.calls / len(expectedModulePaths)
+	reader.calls++
+	if round >= len(reader.rounds) {
+		return tagResolution{}, fmt.Errorf("unexpected tag lookup round %d for %q", round, tag)
+	}
+	resolution, exists := reader.rounds[round][tag]
+	if !exists {
+		return tagResolution{}, fmt.Errorf("test tag resolution missing for %q", tag)
+	}
+	return resolution, nil
+}
+
 func (reader staticTagReader) Lookup(_ context.Context, _, tag string) (tagResolution, error) {
 	if reader.err != nil {
 		return tagResolution{}, reader.err
@@ -598,6 +1087,10 @@ type gitAndValidatorRunner struct {
 	baseSHA            string
 	remoteBaseSHA      string
 	gitFailures        map[string]error
+	localRefs          map[string]string
+	tagCommands        [][]string
+	pushCommands       [][]string
+	pushErr            error
 	validatorArguments []string
 }
 
@@ -609,6 +1102,7 @@ func newGitAndValidatorRunner(root string) *gitAndValidatorRunner {
 		baseSHA:       testBaseSHA,
 		remoteBaseSHA: "5555555555555555555555555555555555555555",
 		gitFailures:   make(map[string]error),
+		localRefs:     make(map[string]string),
 	}
 }
 
@@ -635,6 +1129,11 @@ func (runner *gitAndValidatorRunner) Run(
 		return nil, err
 	}
 	switch {
+	case len(gitArguments) == 4 &&
+		gitArguments[0] == "fetch" &&
+		gitArguments[1] == "--no-tags" &&
+		gitArguments[2] == "origin":
+		return nil, nil
 	case joined == "rev-parse --verify HEAD^{commit}":
 		return []byte(runner.headSHA + "\n"), nil
 	case joined == "cat-file -e "+runner.mergeSHA+"^{commit}":
@@ -647,6 +1146,22 @@ func (runner *gitAndValidatorRunner) Run(
 		return []byte(runner.remoteBaseSHA + "\n"), nil
 	case joined == "merge-base --is-ancestor "+runner.mergeSHA+" refs/remotes/origin/main":
 		return nil, nil
+	case len(gitArguments) == 3 &&
+		gitArguments[0] == "for-each-ref" &&
+		gitArguments[1] == "--format=%(refname)":
+		tag := strings.TrimPrefix(gitArguments[2], "refs/tags/")
+		return []byte(runner.localRefs[tag]), nil
+	case len(gitArguments) == 7 &&
+		gitArguments[0] == "tag" &&
+		gitArguments[1] == "--annotate" &&
+		gitArguments[2] == "--no-sign" &&
+		gitArguments[3] == "--message":
+		runner.tagCommands = append(runner.tagCommands, append([]string(nil), gitArguments...))
+		runner.localRefs[gitArguments[5]] = "refs/tags/" + gitArguments[5]
+		return nil, nil
+	case len(gitArguments) >= 3 && gitArguments[0] == "push":
+		runner.pushCommands = append(runner.pushCommands, append([]string(nil), gitArguments...))
+		return nil, runner.pushErr
 	default:
 		return nil, fmt.Errorf("unexpected git command: %s", joined)
 	}

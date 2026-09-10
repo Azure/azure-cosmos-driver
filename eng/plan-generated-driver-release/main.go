@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -33,6 +35,7 @@ var (
 		`^[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9_.-]*[A-Za-z0-9])?$`,
 	)
 	semverPattern        = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+	digestPattern        = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	headerVersionPattern = regexp.MustCompile(
 		`(?m)^[\t ]*#define[\t ]+AZURECOSMOSDRIVER_H_VERSION[\t ]+"([^"\r\n]+)"[\t ]*(?:[/][/*].*)?$`,
 	)
@@ -130,6 +133,7 @@ type releasePlan struct {
 	BaseBranch                string       `json:"base_branch"`
 	BaseSHA                   string       `json:"base_sha"`
 	DerivedMergeSHA           string       `json:"derived_merge_sha"`
+	RemoteDefaultBranchSHA    string       `json:"remote_default_branch_sha,omitempty"`
 	IntegrityValidatorBaseRef string       `json:"integrity_validator_base_ref"`
 	UpstreamSourceSHA         string       `json:"upstream_source_sha,omitempty"`
 	RequestedVersion          string       `json:"requested_version"`
@@ -156,9 +160,35 @@ type planOptions struct {
 	ValidatorPath string
 }
 
+type publicationResult struct {
+	SchemaVersion          int          `json:"schema_version"`
+	Repository             string       `json:"repository"`
+	SourcePR               int          `json:"source_pr"`
+	DerivedMergeSHA        string       `json:"derived_merge_sha"`
+	RequestedVersion       string       `json:"requested_version"`
+	UpstreamSourceSHA      string       `json:"upstream_source_sha,omitempty"`
+	NativeInterfaceVersion string       `json:"native_interface_version,omitempty"`
+	RustDriverVersion      string       `json:"rust_driver_version,omitempty"`
+	ApprovedPlanDigest     string       `json:"approved_plan_digest"`
+	FinalPlanDigest        string       `json:"final_plan_digest,omitempty"`
+	Modules                []modulePlan `json:"modules"`
+	Status                 string       `json:"status"`
+	PushAttempted          bool         `json:"push_attempted"`
+	AtomicPush             bool         `json:"atomic_push"`
+	Reasons                []string     `json:"reasons"`
+}
+
+type publishOptions struct {
+	Root          string
+	Repository    string
+	Version       string
+	ValidatorPath string
+	Remote        string
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		exitError(errors.New("usage: release-planner <resolve-pr|plan> [options]"))
+		exitError(errors.New("usage: release-planner <resolve-pr|plan|publish> [options]"))
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -169,6 +199,8 @@ func main() {
 		exitError(runResolvePR(ctx, os.Args[2:], execCommandRunner{}))
 	case "plan":
 		exitError(runPlanCommand(ctx, os.Args[2:], execCommandRunner{}))
+	case "publish":
+		exitError(runPublishCommand(ctx, os.Args[2:], execCommandRunner{}))
 	default:
 		exitError(fmt.Errorf("unknown command %q", os.Args[1]))
 	}
@@ -287,6 +319,365 @@ func runPlanCommand(ctx context.Context, arguments []string, runner commandRunne
 	return nil
 }
 
+func runPublishCommand(ctx context.Context, arguments []string, runner commandRunner) error {
+	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	root := flags.String("root", "", "checked-out merged candidate repository")
+	repository := flags.String("repository", "", "owner/repository")
+	version := flags.String("version", "", "canonical stable module version without leading v")
+	metadata := flags.String("pr-metadata", "", "freshly validated pull request metadata JSON")
+	validator := flags.String("validator", "", "trusted generated-driver validator executable")
+	approvedPlanPath := flags.String("approved-plan", "", "pre-approval release plan JSON")
+	approvedDigest := flags.String("approved-plan-digest", "", "SHA-256 digest of the approved plan")
+	output := flags.String("output", "", "machine-readable publication result JSON")
+	summary := flags.String("summary", "", "GitHub Step Summary file")
+	githubOutput := flags.String("github-output", "", "GitHub Actions output file")
+	remote := flags.String("remote", "origin", "authenticated Git remote used for the atomic push")
+	if err := flags.Parse(arguments); err != nil {
+		return err
+	}
+	if *root == "" ||
+		*repository == "" ||
+		*metadata == "" ||
+		*validator == "" ||
+		*approvedPlanPath == "" ||
+		*output == "" {
+		return errors.New(
+			"-root, -repository, -pr-metadata, -validator, -approved-plan, and -output are required",
+		)
+	}
+
+	pr, err := readPullRequest(*metadata)
+	if err != nil {
+		return err
+	}
+	approvedPlan, err := readReleasePlan(*approvedPlanPath)
+	if err != nil {
+		return err
+	}
+	result := newPublicationResult(*repository, *version, *approvedDigest, approvedPlan)
+	client := githubClient{runner: runner}
+	result, publishErr := publishRelease(ctx, publishOptions{
+		Root:          *root,
+		Repository:    *repository,
+		Version:       *version,
+		ValidatorPath: *validator,
+		Remote:        *remote,
+	}, pr, approvedPlan, *approvedDigest, runner, client)
+	if err := writePublicationArtifacts(result, *output, *summary, *githubOutput); err != nil {
+		return err
+	}
+	if publishErr != nil {
+		return publishErr
+	}
+	fmt.Printf("Generated publication result with status %s.\n", result.Status)
+	return nil
+}
+
+func newPublicationResult(
+	repository string,
+	version string,
+	approvedDigest string,
+	approvedPlan releasePlan,
+) publicationResult {
+	return publicationResult{
+		SchemaVersion:          planSchemaVersion,
+		Repository:             repository,
+		SourcePR:               approvedPlan.SourcePR,
+		DerivedMergeSHA:        approvedPlan.DerivedMergeSHA,
+		RequestedVersion:       version,
+		UpstreamSourceSHA:      approvedPlan.UpstreamSourceSHA,
+		NativeInterfaceVersion: approvedPlan.NativeInterfaceVersion,
+		RustDriverVersion:      approvedPlan.RustDriverVersion,
+		ApprovedPlanDigest:     approvedDigest,
+		Modules:                append([]modulePlan(nil), approvedPlan.Modules...),
+		Status:                 "blocked",
+		AtomicPush:             true,
+		Reasons:                []string{"publication did not complete"},
+	}
+}
+
+func publishRelease(
+	ctx context.Context,
+	options publishOptions,
+	pr pullRequest,
+	approvedPlan releasePlan,
+	approvedDigest string,
+	runner commandRunner,
+	tags tagReader,
+) (publicationResult, error) {
+	result := newPublicationResult(options.Repository, options.Version, approvedDigest, approvedPlan)
+	fail := func(status, reason string, err error) (publicationResult, error) {
+		result.Status = status
+		result.Reasons = []string{fmt.Sprintf("%s: %v", reason, err)}
+		return result, fmt.Errorf("%s: %w", reason, err)
+	}
+
+	if options.Remote != "origin" {
+		return fail("blocked", "publication remote is invalid", errors.New(`only "origin" is allowed`))
+	}
+	if err := validateApprovedPlan(approvedPlan, options, pr); err != nil {
+		return fail("blocked", "approved plan is invalid", err)
+	}
+	actualApprovedDigest, err := planDigest(approvedPlan)
+	if err != nil {
+		return fail("blocked", "approved plan digest failed", err)
+	}
+	if !digestPattern.MatchString(approvedDigest) || actualApprovedDigest != approvedDigest {
+		return fail(
+			"blocked",
+			"approved plan digest does not match",
+			fmt.Errorf("expected %s, got %s", actualApprovedDigest, approvedDigest),
+		)
+	}
+	if err := refreshRemoteDefaultBranch(ctx, options.Root, pr.Base.Ref, options.Remote, runner); err != nil {
+		return fail("blocked", "final default-branch refresh failed", err)
+	}
+
+	finalPlan, planErr := buildReleasePlan(ctx, planOptions{
+		Root:          options.Root,
+		Repository:    options.Repository,
+		Version:       options.Version,
+		ValidatorPath: options.ValidatorPath,
+	}, pr, runner, tags)
+	result.Modules = append([]modulePlan(nil), finalPlan.Modules...)
+	result.UpstreamSourceSHA = finalPlan.UpstreamSourceSHA
+	result.NativeInterfaceVersion = finalPlan.NativeInterfaceVersion
+	result.RustDriverVersion = finalPlan.RustDriverVersion
+	if planErr != nil {
+		return fail("blocked", "final release revalidation failed", planErr)
+	}
+	finalDigest, err := planDigest(finalPlan)
+	if err != nil {
+		return fail("blocked", "final plan digest failed", err)
+	}
+	result.FinalPlanDigest = finalDigest
+	if finalDigest != approvedDigest {
+		return fail(
+			"blocked",
+			"release plan drifted while awaiting approval",
+			fmt.Errorf("approved=%s final=%s", approvedDigest, finalDigest),
+		)
+	}
+
+	if finalPlan.Status == "already_published" {
+		verifiedModules, verifyStatus, reasons, err := verifyRemoteTags(
+			ctx,
+			options.Repository,
+			options.Version,
+			pr.MergeCommitSHA,
+			tags,
+		)
+		result.Modules = verifiedModules
+		if err != nil {
+			result.Status = "indeterminate"
+			result.Reasons = []string{fmt.Sprintf("idempotency verification failed: %v", err)}
+			return result, err
+		}
+		if verifyStatus != "already_published" {
+			result.Status = "blocked"
+			result.Reasons = append(
+				[]string{"remote tags changed during idempotency verification"},
+				reasons...,
+			)
+			return result, errors.New(strings.Join(result.Reasons, "; "))
+		}
+		result.Status = "already_published"
+		result.Reasons = reasons
+		return result, nil
+	}
+	if finalPlan.Status != "eligible_to_publish" {
+		return fail(
+			"blocked",
+			"approved plan is not publishable",
+			fmt.Errorf("unexpected status %q", finalPlan.Status),
+		)
+	}
+
+	for _, module := range finalPlan.Modules {
+		existing, err := localTagReference(ctx, options.Root, module.Tag, runner)
+		if err != nil {
+			return fail("blocked", "local tag collision check failed", err)
+		}
+		if existing != "" {
+			return fail(
+				"blocked",
+				"local tag collision detected",
+				fmt.Errorf("%s already exists as %s", module.Tag, existing),
+			)
+		}
+	}
+	for _, module := range finalPlan.Modules {
+		message := annotatedTagMessage(module.Path, finalPlan)
+		if _, err := runGit(
+			ctx,
+			runner,
+			options.Root,
+			"tag",
+			"--annotate",
+			"--no-sign",
+			"--message",
+			message,
+			module.Tag,
+			pr.MergeCommitSHA,
+		); err != nil {
+			return fail("blocked", "local annotated tag creation failed", err)
+		}
+	}
+
+	pushArguments := []string{"push", "--atomic", options.Remote}
+	for _, module := range finalPlan.Modules {
+		ref := "refs/tags/" + module.Tag
+		pushArguments = append(pushArguments, ref+":"+ref)
+	}
+	result.PushAttempted = true
+	_, pushErr := runGit(ctx, runner, options.Root, pushArguments...)
+
+	verifiedModules, verifyStatus, reasons, verifyErr := verifyRemoteTags(
+		ctx,
+		options.Repository,
+		options.Version,
+		pr.MergeCommitSHA,
+		tags,
+	)
+	result.Modules = verifiedModules
+	if verifyErr != nil {
+		result.Status = "indeterminate"
+		result.Reasons = []string{fmt.Sprintf("post-publish verification failed: %v", verifyErr)}
+		return result, errors.New(result.Reasons[0])
+	}
+	if pushErr != nil {
+		if verifyStatus == "eligible_to_publish" {
+			result.Status = "blocked"
+			result.Reasons = []string{
+				fmt.Sprintf("atomic push was rejected and remote verification found all six tags absent: %v", pushErr),
+			}
+			return result, errors.New(result.Reasons[0])
+		}
+		result.Status = "indeterminate"
+		result.Reasons = append(
+			[]string{fmt.Sprintf("atomic push was rejected but the remote tag state changed: %v", pushErr)},
+			reasons...,
+		)
+		return result, errors.New(strings.Join(result.Reasons, "; "))
+	}
+	if verifyStatus == "already_published" {
+		result.Status = "published"
+		result.Reasons = []string{"all six published tags resolve to the derived merge SHA"}
+		return result, nil
+	}
+	result.Status = "indeterminate"
+	result.Reasons = append(
+		[]string{"atomic push reported success but the expected remote tag state could not be verified"},
+		reasons...,
+	)
+	return result, errors.New(strings.Join(result.Reasons, "; "))
+}
+
+func validateApprovedPlan(approved releasePlan, options publishOptions, pr pullRequest) error {
+	if approved.SchemaVersion != planSchemaVersion {
+		return fmt.Errorf("unsupported approved plan schema_version %d", approved.SchemaVersion)
+	}
+	if approved.Status != "eligible_to_publish" && approved.Status != "already_published" {
+		return fmt.Errorf("approved plan status %q cannot be published", approved.Status)
+	}
+	if approved.Repository != options.Repository ||
+		approved.SourcePR != pr.Number ||
+		approved.BaseBranch != pr.Base.Ref ||
+		approved.BaseSHA != pr.Base.SHA ||
+		approved.DerivedMergeSHA != pr.MergeCommitSHA ||
+		approved.RequestedVersion != options.Version {
+		return errors.New("approved plan repository, PR, merge, base, or version does not match fresh inputs")
+	}
+	if len(approved.Modules) != len(expectedModulePaths) {
+		return fmt.Errorf("approved plan contains %d modules; expected six", len(approved.Modules))
+	}
+	for index, modulePath := range expectedModulePaths {
+		module := approved.Modules[index]
+		if module.Path != modulePath || module.Tag != modulePath+"/v"+options.Version {
+			return fmt.Errorf("approved plan module %d does not match the lockstep tag contract", index)
+		}
+	}
+	return nil
+}
+
+func refreshRemoteDefaultBranch(
+	ctx context.Context,
+	root string,
+	defaultBranch string,
+	remote string,
+	runner commandRunner,
+) error {
+	if err := validateBranchName(defaultBranch); err != nil {
+		return err
+	}
+	refspec := "+refs/heads/" + defaultBranch + ":refs/remotes/origin/" + defaultBranch
+	if _, err := runGit(ctx, runner, root, "fetch", "--no-tags", remote, refspec); err != nil {
+		return err
+	}
+	return nil
+}
+
+func localTagReference(ctx context.Context, root, tag string, runner commandRunner) (string, error) {
+	expectedRef := "refs/tags/" + tag
+	output, err := runGit(
+		ctx,
+		runner,
+		root,
+		"for-each-ref",
+		"--format=%(refname)",
+		expectedRef,
+	)
+	if err != nil {
+		return "", err
+	}
+	if output == "" {
+		return "", nil
+	}
+	if output != expectedRef {
+		return "", fmt.Errorf("unexpected local reference output %q", output)
+	}
+	return output, nil
+}
+
+func annotatedTagMessage(modulePath string, plan releasePlan) string {
+	return fmt.Sprintf(
+		"Azure Cosmos DB generated driver module release\n\n"+
+			"Module: %s\n"+
+			"Version: %s\n"+
+			"Driver merge SHA: %s\n"+
+			"Upstream source SHA: %s\n"+
+			"Native interface version: %s\n"+
+			"Rust implementation version: %s",
+		modulePath,
+		plan.RequestedVersion,
+		plan.DerivedMergeSHA,
+		plan.UpstreamSourceSHA,
+		plan.NativeInterfaceVersion,
+		plan.RustDriverVersion,
+	)
+}
+
+func verifyRemoteTags(
+	ctx context.Context,
+	repository string,
+	version string,
+	expectedCommit string,
+	tags tagReader,
+) ([]modulePlan, string, []string, error) {
+	resolutions := make(map[string]tagResolution, len(expectedModulePaths))
+	for _, modulePath := range expectedModulePaths {
+		tag := modulePath + "/v" + version
+		resolution, err := tags.Lookup(ctx, repository, tag)
+		if err != nil {
+			return nil, "indeterminate", nil, fmt.Errorf("verify remote tag %q: %w", tag, err)
+		}
+		resolutions[tag] = resolution
+	}
+	modules, status, reasons := classifyTags(version, expectedCommit, resolutions)
+	return modules, status, reasons, nil
+}
+
 func newReleasePlan(repository, version string, pr pullRequest) releasePlan {
 	modules := make([]modulePlan, 0, len(expectedModulePaths))
 	for _, modulePath := range expectedModulePaths {
@@ -333,9 +724,11 @@ func buildReleasePlan(
 	if _, err := validateVersion(options.Version); err != nil {
 		return block("requested version is invalid", err)
 	}
-	if err := validateCandidateGitState(ctx, options.Root, pr, runner); err != nil {
+	remoteDefaultBranchSHA, err := validateCandidateGitState(ctx, options.Root, pr, runner)
+	if err != nil {
 		return block("candidate merge commit validation failed", err)
 	}
+	plan.RemoteDefaultBranchSHA = remoteDefaultBranchSHA
 	plan.IntegrityValidatorBaseRef = pr.Base.SHA
 	if _, err := runner.Run(
 		ctx,
@@ -434,38 +827,44 @@ func validateVersion(version string) (uint64, error) {
 	return major, nil
 }
 
-func validateCandidateGitState(ctx context.Context, root string, pr pullRequest, runner commandRunner) error {
+func validateCandidateGitState(
+	ctx context.Context,
+	root string,
+	pr pullRequest,
+	runner commandRunner,
+) (string, error) {
 	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
-		return fmt.Errorf("resolve candidate root: %w", err)
+		return "", fmt.Errorf("resolve candidate root: %w", err)
 	}
 	if err := validateBranchName(pr.Base.Ref); err != nil {
-		return err
+		return "", err
 	}
 	head, err := runGit(ctx, runner, absoluteRoot, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if head != pr.MergeCommitSHA {
-		return fmt.Errorf("candidate HEAD is %s, expected derived merge SHA %s", head, pr.MergeCommitSHA)
+		return "", fmt.Errorf("candidate HEAD is %s, expected derived merge SHA %s", head, pr.MergeCommitSHA)
 	}
 	if _, err := runGit(ctx, runner, absoluteRoot, "cat-file", "-e", pr.MergeCommitSHA+"^{commit}"); err != nil {
-		return fmt.Errorf("derived merge SHA is not a commit: %w", err)
+		return "", fmt.Errorf("derived merge SHA is not a commit: %w", err)
 	}
 	if _, err := runGit(ctx, runner, absoluteRoot, "cat-file", "-e", pr.Base.SHA+"^{commit}"); err != nil {
-		return fmt.Errorf("pull request base SHA is not a commit: %w", err)
+		return "", fmt.Errorf("pull request base SHA is not a commit: %w", err)
 	}
 	if _, err := runGit(ctx, runner, absoluteRoot, "merge-base", "--is-ancestor", pr.Base.SHA, pr.MergeCommitSHA); err != nil {
-		return errors.New("pull request base SHA is not an ancestor of the derived merge commit")
+		return "", errors.New("pull request base SHA is not an ancestor of the derived merge commit")
 	}
 	remoteBase := "refs/remotes/origin/" + pr.Base.Ref
-	if _, err := runGit(ctx, runner, absoluteRoot, "rev-parse", "--verify", remoteBase+"^{commit}"); err != nil {
-		return fmt.Errorf("current remote default branch is unavailable: %w", err)
+	remoteDefaultBranchSHA, err := runGit(ctx, runner, absoluteRoot, "rev-parse", "--verify", remoteBase+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("current remote default branch is unavailable: %w", err)
 	}
 	if _, err := runGit(ctx, runner, absoluteRoot, "merge-base", "--is-ancestor", pr.MergeCommitSHA, remoteBase); err != nil {
-		return fmt.Errorf("derived merge SHA is not reachable from current remote default branch %q", pr.Base.Ref)
+		return "", fmt.Errorf("derived merge SHA is not reachable from current remote default branch %q", pr.Base.Ref)
 	}
-	return nil
+	return remoteDefaultBranchSHA, nil
 }
 
 func runGit(
@@ -772,6 +1171,32 @@ func readPullRequest(filename string) (pullRequest, error) {
 	return pr, nil
 }
 
+func readReleasePlan(filename string) (releasePlan, error) {
+	contents, err := os.ReadFile(filename)
+	if err != nil {
+		return releasePlan{}, fmt.Errorf("read approved release plan: %w", err)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(contents))
+	decoder.DisallowUnknownFields()
+	var plan releasePlan
+	if err := decoder.Decode(&plan); err != nil {
+		return releasePlan{}, fmt.Errorf("parse approved release plan: %w", err)
+	}
+	if err := ensureJSONEnd(decoder); err != nil {
+		return releasePlan{}, fmt.Errorf("parse approved release plan: %w", err)
+	}
+	return plan, nil
+}
+
+func planDigest(plan releasePlan) (string, error) {
+	contents, err := json.Marshal(plan)
+	if err != nil {
+		return "", fmt.Errorf("encode canonical release plan: %w", err)
+	}
+	sum := sha256.Sum256(contents)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func ensureJSONEnd(decoder *json.Decoder) error {
 	var extra any
 	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
@@ -807,14 +1232,49 @@ func writePlanArtifacts(plan releasePlan, output, summary, githubOutput string) 
 		}
 	}
 	if githubOutput != "" {
+		digest, err := planDigest(plan)
+		if err != nil {
+			return err
+		}
 		compact, err := json.Marshal(plan)
 		if err != nil {
 			return fmt.Errorf("encode plan output: %w", err)
 		}
 		outputs := map[string]string{
-			"merge_sha": plan.DerivedMergeSHA,
-			"plan_json": string(compact),
-			"status":    plan.Status,
+			"merge_sha":   plan.DerivedMergeSHA,
+			"plan_digest": digest,
+			"plan_json":   string(compact),
+			"status":      plan.Status,
+		}
+		if err := appendGitHubOutputs(githubOutput, outputs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writePublicationArtifacts(
+	result publicationResult,
+	output string,
+	summary string,
+	githubOutput string,
+) error {
+	if err := writeJSON(output, result); err != nil {
+		return err
+	}
+	if summary != "" {
+		if err := appendPublicationSummary(summary, result); err != nil {
+			return err
+		}
+	}
+	if githubOutput != "" {
+		compact, err := json.Marshal(result)
+		if err != nil {
+			return fmt.Errorf("encode publication result output: %w", err)
+		}
+		outputs := map[string]string{
+			"publication_json": string(compact),
+			"status":           result.Status,
 		}
 		if err := appendGitHubOutputs(githubOutput, outputs); err != nil {
 			return err
@@ -884,6 +1344,51 @@ func appendSummary(filename string, plan releasePlan) error {
 	}
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "> Phase 1 is read-only. This workflow cannot create, delete, or move tags or publish a GitHub Release.")
+	if err := writer.Flush(); err != nil {
+		return fmt.Errorf("write GitHub Step Summary: %w", err)
+	}
+	return nil
+}
+
+func appendPublicationSummary(filename string, result publicationResult) error {
+	file, err := os.OpenFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("open GitHub Step Summary: %w", err)
+	}
+	defer file.Close()
+	writer := bufio.NewWriter(file)
+	fmt.Fprintln(writer, "## Generated driver publication")
+	fmt.Fprintln(writer)
+	fmt.Fprintf(writer, "- **Status:** `%s`\n", markdownCell(result.Status))
+	fmt.Fprintf(writer, "- **Source PR:** `#%d`\n", result.SourcePR)
+	fmt.Fprintf(writer, "- **Derived merge SHA:** `%s`\n", markdownCell(result.DerivedMergeSHA))
+	fmt.Fprintf(writer, "- **Requested version:** `%s`\n", markdownCell(result.RequestedVersion))
+	fmt.Fprintf(writer, "- **Approved plan digest:** `%s`\n", markdownCell(result.ApprovedPlanDigest))
+	fmt.Fprintf(writer, "- **Final plan digest:** `%s`\n", markdownCell(result.FinalPlanDigest))
+	fmt.Fprintf(writer, "- **Atomic push attempted:** `%t`\n", result.PushAttempted)
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "| Module | Annotated tag | Remote state | Resolved commit |")
+	fmt.Fprintln(writer, "|---|---|---|---|")
+	for _, module := range result.Modules {
+		fmt.Fprintf(
+			writer,
+			"| `%s` | `%s` | `%s` | `%s` |\n",
+			markdownCell(module.Path),
+			markdownCell(module.Tag),
+			markdownCell(module.TagState),
+			markdownCell(module.ResolvedCommitSHA),
+		)
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintln(writer, "### Reasons")
+	for _, reason := range result.Reasons {
+		fmt.Fprintf(writer, "- %s\n", markdownCell(reason))
+	}
+	fmt.Fprintln(writer)
+	fmt.Fprintln(
+		writer,
+		"> Publication uses one non-forced atomic push for six annotated tags. It never moves or deletes tags and does not create a GitHub Release.",
+	)
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("write GitHub Step Summary: %w", err)
 	}

@@ -101,6 +101,45 @@ does not configure consumer credentials. Provenance and archive hashes are struc
 cryptographically cross-checked by the existing validator, but Phase 1 does not claim independent
 COSE signature verification; that remains a future repository-governance decision.
 
+## Atomic release publication
+
+The
+[`Publish generated driver release`](./.github/workflows/publish-generated-driver-release.yml)
+manual workflow is Phase 2. It accepts the same `pr_number` and canonical `version` inputs and first
+runs the complete read-only Phase 1 plan. The publication job uses the `driver-release` environment,
+where repository administrators can configure required reviewers and prevent self-review. The
+workflow is serialized with the `generated-driver-release` concurrency group and does not cancel an
+in-progress publication.
+
+The workflow defaults to read-only permissions. Only the environment-gated publication job receives
+`contents: write`; `pull-requests: read` is used to re-resolve the merged pull request. Both jobs build
+the planner, publisher, and integrity validator from the immutable default-branch commit that
+dispatched the workflow. The candidate merge commit is checked out only as data and no candidate
+scripts are executed. The authenticated candidate checkout is limited to the publication job because
+Git credentials are required for its single push.
+
+After approval, the publisher re-fetches the default branch, re-resolves the pull request, and reruns
+the integrity, release-identity, continuity, module, and remote-tag checks. The approved canonical
+plan digest must exactly match the fresh plan, including the PR, merge SHA, version, default-branch
+tip, and six module tags. If all tags are absent, it creates six deterministic, unsigned annotated
+tags targeting the exact merge commit and invokes one command equivalent to:
+
+```text
+git push --atomic origin refs/tags/<module>/vX.Y.Z:refs/tags/<module>/vX.Y.Z ...
+```
+
+There is no sequential fallback. The publisher never forces, moves, or deletes a tag. If all six tags
+already resolve recursively to the expected merge commit, the run is an `already_published` no-op.
+Partial, mismatched, malformed, or drifted state is `blocked`. An ambiguous result after the one
+atomic push attempt is `indeterminate`; rerun only after inspecting the result, and a fresh rerun can
+then establish `already_published`. The workflow verifies all six remote refs after publication and
+emits a non-sensitive JSON result and GitHub Step Summary.
+
+The tags are currently unsigned because the repository has no established non-secret signing
+mechanism; configuring signing is an administrator governance decision. Private-module download
+verification also remains an integration gate until credentials or a private proxy can be configured
+without exposing tokens. Phase 2 does not create an aggregate tag or GitHub Release.
+
 ## Third-party code
 
 This repository does **not** vendor third-party source. It distributes a **prebuilt static archive**
