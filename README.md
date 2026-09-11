@@ -121,8 +121,11 @@ Git credentials are required for its single push.
 After approval, the publisher re-fetches the default branch, re-resolves the pull request, and reruns
 the integrity, release-identity, continuity, module, and remote-tag checks. The approved canonical
 plan digest must exactly match the fresh plan, including the PR, merge SHA, version, default-branch
-tip, and six module tags. If all tags are absent, it creates six deterministic, unsigned annotated
-tags targeting the exact merge commit and invokes one command equivalent to:
+ancestry requirement, release identity, and six module tags. The observed default-branch tips are
+reported for auditability but excluded from the digest, so an unrelated `main` advance does not block
+publication while the target merge remains reachable. If all tags are absent, it creates six
+deterministic, unsigned annotated tags targeting the exact merge commit and invokes one command
+equivalent to:
 
 ```text
 git push --atomic origin refs/tags/<module>/vX.Y.Z:refs/tags/<module>/vX.Y.Z ...

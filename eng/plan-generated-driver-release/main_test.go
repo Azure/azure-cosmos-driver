@@ -675,13 +675,6 @@ func TestPublishReleaseBlocksApprovalDrift(t *testing.T) {
 			},
 			digest: mustPlanDigest,
 		},
-		{
-			name: "default branch tip",
-			mutate: func(_ *releasePlan, _ *pullRequest, _ *publishOptions, runner *gitAndValidatorRunner) {
-				runner.remoteBaseSHA = "6666666666666666666666666666666666666666"
-			},
-			digest: mustPlanDigest,
-		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -716,6 +709,146 @@ func TestPublishReleaseBlocksApprovalDrift(t *testing.T) {
 			assertNoPublicationMutation(t, runner)
 		})
 	}
+}
+
+func TestPlanDigestBindsImmutableApprovalContract(t *testing.T) {
+	t.Parallel()
+	original := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	originalDigest := mustPlanDigest(t, original)
+	for _, test := range []struct {
+		name   string
+		mutate func(*releasePlan)
+	}{
+		{
+			name:   "source PR",
+			mutate: func(plan *releasePlan) { plan.SourcePR++ },
+		},
+		{
+			name:   "merge SHA",
+			mutate: func(plan *releasePlan) { plan.DerivedMergeSHA = testTagSHA },
+		},
+		{
+			name:   "version",
+			mutate: func(plan *releasePlan) { plan.RequestedVersion = "0.2.0" },
+		},
+		{
+			name:   "module path",
+			mutate: func(plan *releasePlan) { plan.Modules[0].Path = "windows/arm64" },
+		},
+		{
+			name:   "module tag",
+			mutate: func(plan *releasePlan) { plan.Modules[0].Tag = "windows/amd64/v0.2.0" },
+		},
+		{
+			name:   "module tag state",
+			mutate: func(plan *releasePlan) { plan.Modules[0].TagState = "at_target" },
+		},
+		{
+			name:   "module tag kind",
+			mutate: func(plan *releasePlan) { plan.Modules[0].TagKind = "annotated" },
+		},
+		{
+			name:   "module remote object",
+			mutate: func(plan *releasePlan) { plan.Modules[0].RemoteObjectSHA = testTagSHA },
+		},
+		{
+			name:   "module resolved commit",
+			mutate: func(plan *releasePlan) { plan.Modules[0].ResolvedCommitSHA = testMergeSHA },
+		},
+		{
+			name:   "plan status",
+			mutate: func(plan *releasePlan) { plan.Status = "already_published" },
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			changed := original
+			changed.Modules = append([]modulePlan(nil), original.Modules...)
+			test.mutate(&changed)
+			if digest := mustPlanDigest(t, changed); digest == originalDigest {
+				t.Fatalf("plan digest did not bind %s", test.name)
+			}
+		})
+	}
+}
+
+func TestPlanDigestExcludesRemoteDefaultBranchTip(t *testing.T) {
+	t.Parallel()
+	original := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	advanced := original
+	advanced.RemoteDefaultBranchSHA = "6666666666666666666666666666666666666666"
+	if got, want := mustPlanDigest(t, advanced), mustPlanDigest(t, original); got != want {
+		t.Fatalf("digest after default branch advance = %s, want %s", got, want)
+	}
+}
+
+func TestPublishReleaseAllowsDefaultBranchAdvanceWhenMergeRemainsReachable(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	runner := newGitAndValidatorRunner(root)
+	runner.remoteBaseSHA = "6666666666666666666666666666666666666666"
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+		targetTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err != nil {
+		t.Fatalf("publishRelease() error = %v", err)
+	}
+	if result.Status != "published" || !result.PushAttempted {
+		t.Fatalf("publishRelease() result = %#v", result)
+	}
+	if result.FinalPlanDigest != result.ApprovedPlanDigest {
+		t.Fatalf(
+			"final plan digest = %s, want approved digest %s",
+			result.FinalPlanDigest,
+			result.ApprovedPlanDigest,
+		)
+	}
+	if result.ApprovedDefaultTipSHA != approved.RemoteDefaultBranchSHA ||
+		result.FinalDefaultTipSHA != runner.remoteBaseSHA {
+		t.Fatalf("publication default branch observations = %#v", result)
+	}
+}
+
+func TestPublishReleaseBlocksWhenMergeIsNoLongerReachableAfterRefresh(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixture(t, "0.1.0")
+	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
+	runner := newGitAndValidatorRunner(root)
+	runner.remoteBaseSHA = "6666666666666666666666666666666666666666"
+	runner.failGitCommand(
+		"merge-base --is-ancestor "+testMergeSHA+" refs/remotes/origin/main",
+		errors.New("merge is no longer reachable"),
+	)
+	tags := &sequenceTagReader{rounds: []map[string]tagResolution{
+		absentTagResolutions("0.1.0"),
+	}}
+
+	result, err := publishRelease(context.Background(), publishOptions{
+		Root:          root,
+		Repository:    "Azure/azure-cosmos-driver",
+		Version:       "0.1.0",
+		ValidatorPath: "trusted-validator",
+		Remote:        "origin",
+	}, testPullRequest(), approved, mustPlanDigest(t, approved), runner, tags)
+	if err == nil || result.Status != "blocked" ||
+		!strings.Contains(strings.Join(result.Reasons, " "), "not reachable") {
+		t.Fatalf("publishRelease() result = %#v, error = %v", result, err)
+	}
+	if result.FinalDefaultTipSHA != runner.remoteBaseSHA {
+		t.Fatalf("publish-time default branch SHA = %q, want %q", result.FinalDefaultTipSHA, runner.remoteBaseSHA)
+	}
+	assertNoPublicationMutation(t, runner)
 }
 
 func TestPublishReleaseBlocksLocalTagCollisionBeforeMutation(t *testing.T) {

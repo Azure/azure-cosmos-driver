@@ -153,6 +153,31 @@ type modulePlan struct {
 	ResolvedCommitSHA string `json:"resolved_commit_sha,omitempty"`
 }
 
+type releaseApprovalContract struct {
+	SchemaVersion             int                      `json:"schema_version"`
+	Repository                string                   `json:"repository"`
+	SourcePR                  int                      `json:"source_pr"`
+	BaseBranch                string                   `json:"base_branch"`
+	BaseSHA                   string                   `json:"base_sha"`
+	DerivedMergeSHA           string                   `json:"derived_merge_sha"`
+	IntegrityValidatorBaseRef string                   `json:"integrity_validator_base_ref"`
+	UpstreamSourceSHA         string                   `json:"upstream_source_sha"`
+	RequestedVersion          string                   `json:"requested_version"`
+	NativeInterfaceVersion    string                   `json:"native_interface_version"`
+	RustDriverVersion         string                   `json:"rust_driver_version"`
+	Modules                   []moduleApprovalContract `json:"modules"`
+	Status                    string                   `json:"status"`
+}
+
+type moduleApprovalContract struct {
+	Path              string `json:"path"`
+	Tag               string `json:"tag"`
+	TagState          string `json:"tag_state"`
+	TagKind           string `json:"tag_kind"`
+	RemoteObjectSHA   string `json:"remote_object_sha"`
+	ResolvedCommitSHA string `json:"resolved_commit_sha"`
+}
+
 type planOptions struct {
 	Root          string
 	Repository    string
@@ -171,6 +196,8 @@ type publicationResult struct {
 	RustDriverVersion      string       `json:"rust_driver_version,omitempty"`
 	ApprovedPlanDigest     string       `json:"approved_plan_digest"`
 	FinalPlanDigest        string       `json:"final_plan_digest,omitempty"`
+	ApprovedDefaultTipSHA  string       `json:"approved_default_branch_sha,omitempty"`
+	FinalDefaultTipSHA     string       `json:"final_default_branch_sha,omitempty"`
 	Modules                []modulePlan `json:"modules"`
 	Status                 string       `json:"status"`
 	PushAttempted          bool         `json:"push_attempted"`
@@ -390,6 +417,7 @@ func newPublicationResult(
 		NativeInterfaceVersion: approvedPlan.NativeInterfaceVersion,
 		RustDriverVersion:      approvedPlan.RustDriverVersion,
 		ApprovedPlanDigest:     approvedDigest,
+		ApprovedDefaultTipSHA:  approvedPlan.RemoteDefaultBranchSHA,
 		Modules:                append([]modulePlan(nil), approvedPlan.Modules...),
 		Status:                 "blocked",
 		AtomicPush:             true,
@@ -444,6 +472,7 @@ func publishRelease(
 	result.UpstreamSourceSHA = finalPlan.UpstreamSourceSHA
 	result.NativeInterfaceVersion = finalPlan.NativeInterfaceVersion
 	result.RustDriverVersion = finalPlan.RustDriverVersion
+	result.FinalDefaultTipSHA = finalPlan.RemoteDefaultBranchSHA
 	if planErr != nil {
 		return fail("blocked", "final release revalidation failed", planErr)
 	}
@@ -725,10 +754,10 @@ func buildReleasePlan(
 		return block("requested version is invalid", err)
 	}
 	remoteDefaultBranchSHA, err := validateCandidateGitState(ctx, options.Root, pr, runner)
+	plan.RemoteDefaultBranchSHA = remoteDefaultBranchSHA
 	if err != nil {
 		return block("candidate merge commit validation failed", err)
 	}
-	plan.RemoteDefaultBranchSHA = remoteDefaultBranchSHA
 	plan.IntegrityValidatorBaseRef = pr.Base.SHA
 	if _, err := runner.Run(
 		ctx,
@@ -862,7 +891,10 @@ func validateCandidateGitState(
 		return "", fmt.Errorf("current remote default branch is unavailable: %w", err)
 	}
 	if _, err := runGit(ctx, runner, absoluteRoot, "merge-base", "--is-ancestor", pr.MergeCommitSHA, remoteBase); err != nil {
-		return "", fmt.Errorf("derived merge SHA is not reachable from current remote default branch %q", pr.Base.Ref)
+		return remoteDefaultBranchSHA, fmt.Errorf(
+			"derived merge SHA is not reachable from current remote default branch %q",
+			pr.Base.Ref,
+		)
 	}
 	return remoteDefaultBranchSHA, nil
 }
@@ -1189,7 +1221,33 @@ func readReleasePlan(filename string) (releasePlan, error) {
 }
 
 func planDigest(plan releasePlan) (string, error) {
-	contents, err := json.Marshal(plan)
+	modules := make([]moduleApprovalContract, 0, len(plan.Modules))
+	for _, module := range plan.Modules {
+		modules = append(modules, moduleApprovalContract{
+			Path:              module.Path,
+			Tag:               module.Tag,
+			TagState:          module.TagState,
+			TagKind:           module.TagKind,
+			RemoteObjectSHA:   module.RemoteObjectSHA,
+			ResolvedCommitSHA: module.ResolvedCommitSHA,
+		})
+	}
+	contract := releaseApprovalContract{
+		SchemaVersion:             plan.SchemaVersion,
+		Repository:                plan.Repository,
+		SourcePR:                  plan.SourcePR,
+		BaseBranch:                plan.BaseBranch,
+		BaseSHA:                   plan.BaseSHA,
+		DerivedMergeSHA:           plan.DerivedMergeSHA,
+		IntegrityValidatorBaseRef: plan.IntegrityValidatorBaseRef,
+		UpstreamSourceSHA:         plan.UpstreamSourceSHA,
+		RequestedVersion:          plan.RequestedVersion,
+		NativeInterfaceVersion:    plan.NativeInterfaceVersion,
+		RustDriverVersion:         plan.RustDriverVersion,
+		Modules:                   modules,
+		Status:                    plan.Status,
+	}
+	contents, err := json.Marshal(contract)
 	if err != nil {
 		return "", fmt.Errorf("encode canonical release plan: %w", err)
 	}
@@ -1323,6 +1381,7 @@ func appendSummary(filename string, plan releasePlan) error {
 	fmt.Fprintf(writer, "- **Native interface version:** `%s`\n", markdownCell(plan.NativeInterfaceVersion))
 	fmt.Fprintf(writer, "- **Rust driver version:** `%s`\n", markdownCell(plan.RustDriverVersion))
 	fmt.Fprintf(writer, "- **Integrity base ref:** `%s`\n", markdownCell(plan.IntegrityValidatorBaseRef))
+	fmt.Fprintf(writer, "- **Observed default branch SHA:** `%s`\n", markdownCell(plan.RemoteDefaultBranchSHA))
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "| Module | Proposed tag | Remote state | Kind | Resolved commit |")
 	fmt.Fprintln(writer, "|---|---|---|---|---|")
@@ -1365,6 +1424,8 @@ func appendPublicationSummary(filename string, result publicationResult) error {
 	fmt.Fprintf(writer, "- **Requested version:** `%s`\n", markdownCell(result.RequestedVersion))
 	fmt.Fprintf(writer, "- **Approved plan digest:** `%s`\n", markdownCell(result.ApprovedPlanDigest))
 	fmt.Fprintf(writer, "- **Final plan digest:** `%s`\n", markdownCell(result.FinalPlanDigest))
+	fmt.Fprintf(writer, "- **Plan-time default branch SHA:** `%s`\n", markdownCell(result.ApprovedDefaultTipSHA))
+	fmt.Fprintf(writer, "- **Publish-time default branch SHA:** `%s`\n", markdownCell(result.FinalDefaultTipSHA))
 	fmt.Fprintf(writer, "- **Atomic push attempted:** `%t`\n", result.PushAttempted)
 	fmt.Fprintln(writer)
 	fmt.Fprintln(writer, "| Module | Annotated tag | Remote state | Resolved commit |")
