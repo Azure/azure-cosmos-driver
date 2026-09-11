@@ -30,6 +30,7 @@ jobs:
       plan_digest: ${{ steps.plan.outputs.plan_digest }}
       plan_json: ${{ steps.plan.outputs.plan_json }}
       status: ${{ steps.plan.outputs.status }}
+      governance_status: ${{ steps.governance.outputs.status }}
     steps:
       - name: Require default-branch dispatch
         shell: bash
@@ -112,19 +113,41 @@ jobs:
             -summary "$GITHUB_STEP_SUMMARY" \
             -github-output "$GITHUB_OUTPUT"
 
+      - name: Check release governance readiness
+        id: governance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" governance \
+            -repository "$REPOSITORY" \
+            -config "$GITHUB_WORKSPACE/control/eng/release-governance.json" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-governance-readiness.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
       - name: Upload pre-approval plan
         if: ${{ always() }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: generated-driver-pre-approval-plan
-          path: control/generated-driver-release-plan.json
+          path: |
+            control/generated-driver-release-plan.json
+            control/generated-driver-governance-readiness.json
           if-no-files-found: ignore
           retention-days: 14
 
   publish:
     name: Atomically publish six module tags
     needs: plan
-    if: ${{ needs.plan.outputs.status == 'eligible_to_publish' || needs.plan.outputs.status == 'already_published' }}
+    if: >-
+      ${{
+        needs.plan.outputs.governance_status == 'ready' &&
+        (needs.plan.outputs.status == 'eligible_to_publish' ||
+        needs.plan.outputs.status == 'already_published')
+      }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment: driver-release
@@ -155,6 +178,19 @@ jobs:
           set -euo pipefail
           go build -o "$RUNNER_TEMP/release-planner" ./control/eng/plan-generated-driver-release/main.go
           go build -o "$RUNNER_TEMP/generated-driver-validator" ./control/eng/validate-generated-driver/main.go
+
+      - name: Recheck release governance after approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" governance \
+            -repository "$REPOSITORY" \
+            -config "$GITHUB_WORKSPACE/control/eng/release-governance.json" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-publish-governance-readiness.json" \
+            -summary "$GITHUB_STEP_SUMMARY"
 
       - name: Resolve merged pull request again
         id: source
@@ -219,6 +255,8 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: generated-driver-publication-result
-          path: control/generated-driver-publication-result.json
+          path: |
+            control/generated-driver-publication-result.json
+            control/generated-driver-publish-governance-readiness.json
           if-no-files-found: ignore
           retention-days: 14

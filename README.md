@@ -143,6 +143,12 @@ mechanism; configuring signing is an administrator governance decision. Private-
 verification also remains an integration gate until credentials or a private proxy can be configured
 without exposing tokens. Phase 2 does not create an aggregate tag or GitHub Release.
 
+Publication remains operationally disabled until repository owners complete the environment,
+ruleset, and dedicated release-identity controls in
+[`docs/RELEASE_GOVERNANCE.md`](./docs/RELEASE_GOVERNANCE.md). The pre-approval job runs a GET-only,
+fail-closed readiness check; missing controls are `not_ready`, and API-inaccessible controls are
+`unknown_due_to_permissions`, never ready.
+
 ## Third-party code
 
 This repository does **not** vendor third-party source. It distributes a **prebuilt static archive**

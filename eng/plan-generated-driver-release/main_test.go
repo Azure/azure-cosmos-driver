@@ -951,6 +951,9 @@ func TestPublishWorkflowIsolatedPermissionsAndEnvironment(t *testing.T) {
 		"pull-requests: read",
 		"persist-credentials: false",
 		"persist-credentials: true",
+		"Check release governance readiness",
+		"needs.plan.outputs.governance_status == 'ready'",
+		"eng/release-governance.json",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("publication workflow is missing %q", required)
@@ -959,11 +962,446 @@ func TestPublishWorkflowIsolatedPermissionsAndEnvironment(t *testing.T) {
 	if strings.Count(workflow, "contents: write") != 1 {
 		t.Fatalf("publication workflow contents:write count = %d, want one isolated job", strings.Count(workflow, "contents: write"))
 	}
+	if strings.Count(workflow, `"$RUNNER_TEMP/release-planner" governance`) != 2 {
+		t.Fatalf(
+			"publication workflow governance check count = %d, want pre- and post-approval checks",
+			strings.Count(workflow, `"$RUNNER_TEMP/release-planner" governance`),
+		)
+	}
+	recheck := strings.Index(workflow, "Recheck release governance after approval")
+	credentialCheckout := strings.Index(workflow, "Check out exact merged candidate for publication")
+	if recheck < 0 || credentialCheckout < 0 || recheck >= credentialCheckout {
+		t.Fatal("post-approval governance check must precede the credential-bearing candidate checkout")
+	}
 	for _, forbidden := range []string{"pull_request:", "release:", "environment: production"} {
 		if strings.Contains(workflow, forbidden) {
 			t.Fatalf("publication workflow unexpectedly contains %q", forbidden)
 		}
 	}
+}
+
+func TestEvaluateGovernanceReady(t *testing.T) {
+	t.Parallel()
+	config := readyGovernanceConfig(t)
+	result := evaluateGovernance(
+		"Azure/azure-cosmos-driver",
+		config,
+		readyGovernanceSnapshot(t, config),
+	)
+	if result.Status != "ready" {
+		t.Fatalf("evaluateGovernance() status = %q, reasons = %v", result.Status, result.Reasons)
+	}
+	for _, check := range result.Checks {
+		if check.Status != "ready" {
+			t.Fatalf("check %q status = %q, want ready", check.Name, check.Status)
+		}
+	}
+}
+
+func TestEvaluateGovernanceRejectsIncompleteOrUnsafeState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		mutate func(*governanceConfig, *governanceSnapshot)
+		want   string
+	}{
+		{
+			name: "missing environment",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Environment = nil
+			},
+			want: "does not exist",
+		},
+		{
+			name: "reviewer mismatch",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Environment.ProtectionRules[0].Reviewers[0].Reviewer.Slug = "different-team"
+			},
+			want: "configured reviewer team",
+		},
+		{
+			name: "self review allowed",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Environment.ProtectionRules[0].PreventSelfReview = false
+			},
+			want: "prevent self-review",
+		},
+		{
+			name: "branch policy mismatch",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.BranchPolicies[0].Name = "release"
+			},
+			want: "only the main branch",
+		},
+		{
+			name: "mismatched tag patterns",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].Conditions.RefName.Include[0] = "refs/tags/windows/arm64/v*"
+			},
+			want: "exact six tag patterns",
+		},
+		{
+			name: "broad unsafe tag pattern",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].Conditions.RefName.Include[0] = "refs/tags/**"
+			},
+			want: "exact six tag patterns",
+		},
+		{
+			name: "disabled ruleset",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].Enforcement = "disabled"
+			},
+			want: "active creation ruleset",
+		},
+		{
+			name: "wrong ruleset target",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].Target = "branch"
+			},
+			want: "active creation ruleset",
+		},
+		{
+			name: "inherited ruleset with matching name",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].SourceType = "Organization"
+			},
+			want: "active creation ruleset",
+		},
+		{
+			name: "missing update and deletion restrictions",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[1].Rules = snapshot.Rulesets[1].Rules[1:2]
+			},
+			want: "block update, deletion",
+		},
+		{
+			name: "ambiguous creation actor",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				snapshot.Rulesets[0].BypassActors = append(
+					snapshot.Rulesets[0].BypassActors,
+					snapshot.Rulesets[0].BypassActors[0],
+				)
+			},
+			want: "limited to the configured GitHub App",
+		},
+		{
+			name: "unexpected additional active tag ruleset",
+			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
+				extra := snapshot.Rulesets[0]
+				extra.Name = "unexpected-tag-ruleset"
+				extra.ID = 3
+				snapshot.Rulesets = append(snapshot.Rulesets, extra)
+			},
+			want: "exactly the two approved",
+		},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config := readyGovernanceConfig(t)
+			snapshot := readyGovernanceSnapshot(t, config)
+			test.mutate(&config, &snapshot)
+			result := evaluateGovernance("Azure/azure-cosmos-driver", config, snapshot)
+			if result.Status != "not_ready" {
+				t.Fatalf("evaluateGovernance() status = %q, want not_ready", result.Status)
+			}
+			if !containsSubstring(result.Reasons, test.want) {
+				t.Fatalf("evaluateGovernance() reasons = %v, want substring %q", result.Reasons, test.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateGovernanceTreatsInaccessibleAPIsAsUnknown(t *testing.T) {
+	t.Parallel()
+	config := readyGovernanceConfig(t)
+	for _, test := range []struct {
+		name   string
+		mutate func(*governanceSnapshot)
+	}{
+		{
+			name: "environment 404",
+			mutate: func(snapshot *governanceSnapshot) {
+				snapshot.EnvironmentError = governanceAPIError{
+					Endpoint: "repos/Azure/azure-cosmos-driver/environments",
+					Status:   404,
+					Err:      errors.New("not found"),
+				}
+			},
+		},
+		{
+			name: "branch policy 403",
+			mutate: func(snapshot *governanceSnapshot) {
+				snapshot.BranchPolicyError = governanceAPIError{
+					Endpoint: "deployment-branch-policies",
+					Status:   403,
+					Err:      errors.New("forbidden"),
+				}
+			},
+		},
+		{
+			name: "ruleset detail unavailable",
+			mutate: func(snapshot *governanceSnapshot) {
+				snapshot.RulesetError = governanceAPIError{
+					Endpoint: "rulesets/1",
+					Status:   404,
+					Err:      errors.New("not found"),
+				}
+			},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			snapshot := readyGovernanceSnapshot(t, config)
+			test.mutate(&snapshot)
+			result := evaluateGovernance("Azure/azure-cosmos-driver", config, snapshot)
+			if result.Status != "unknown_due_to_permissions" {
+				t.Fatalf(
+					"evaluateGovernance() status = %q, want unknown_due_to_permissions",
+					result.Status,
+				)
+			}
+		})
+	}
+}
+
+func TestGovernanceClientPreservesPermissionAmbiguity(t *testing.T) {
+	t.Parallel()
+	runner := &scriptedRunner{responses: []scriptedResponse{{
+		name:     "gh",
+		contains: "environments?per_page=100",
+		output:   "gh: Resource not found (HTTP 404)",
+		err:      errors.New("exit status 1"),
+	}}}
+	_, err := (githubGovernanceClient{runner: runner}).ListEnvironments(
+		context.Background(),
+		"Azure/azure-cosmos-driver",
+	)
+	var apiErr governanceAPIError
+	if !errors.As(err, &apiErr) || apiErr.Status != 404 {
+		t.Fatalf("ListEnvironments() error = %#v, want governance API HTTP 404", err)
+	}
+	if len(runner.commands) != 1 ||
+		!containsString(runner.commands[0].arguments, "GET") ||
+		containsString(runner.commands[0].arguments, "DELETE") {
+		t.Fatalf("unexpected governance API command: %#v", runner.commands)
+	}
+}
+
+func TestGovernanceClientUsesOnlyGETAndPaginates(t *testing.T) {
+	t.Parallel()
+	config := readyGovernanceConfig(t)
+	snapshot := readyGovernanceSnapshot(t, config)
+	environmentPage, _ := json.Marshal([]any{
+		map[string]any{"environments": []githubEnvironment{*snapshot.Environment}},
+		map[string]any{"environments": []githubEnvironment{}},
+	})
+	environment, _ := json.Marshal(snapshot.Environment)
+	branchPage, _ := json.Marshal([]any{
+		map[string]any{"branch_policies": snapshot.BranchPolicies},
+	})
+	rulesetPages, _ := json.Marshal([]any{
+		[]githubRuleset{{ID: 1}},
+		[]githubRuleset{{ID: 2}},
+	})
+	creation, _ := json.Marshal(snapshot.Rulesets[0])
+	immutability, _ := json.Marshal(snapshot.Rulesets[1])
+	runner := &scriptedRunner{responses: []scriptedResponse{
+		{name: "gh", contains: "environments?per_page=100", output: string(environmentPage)},
+		{name: "gh", contains: "environments/driver-release", output: string(environment)},
+		{name: "gh", contains: "deployment-branch-policies?per_page=100", output: string(branchPage)},
+		{name: "gh", contains: "rulesets?targets=tag&per_page=100", output: string(rulesetPages)},
+		{name: "gh", contains: "rulesets/1", output: string(creation)},
+		{name: "gh", contains: "rulesets/2", output: string(immutability)},
+	}}
+	collected := collectGovernanceSnapshot(
+		context.Background(),
+		"Azure/azure-cosmos-driver",
+		config,
+		githubGovernanceClient{runner: runner},
+	)
+	if collected.Environment == nil || len(collected.BranchPolicies) != 1 || len(collected.Rulesets) != 2 {
+		t.Fatalf("collectGovernanceSnapshot() = %#v", collected)
+	}
+	if len(runner.responses) != 0 {
+		t.Fatalf("%d scripted responses were not consumed", len(runner.responses))
+	}
+	for _, command := range runner.commands {
+		if command.name != "gh" || !containsString(command.arguments, "GET") {
+			t.Fatalf("governance issued non-GET command: %s %v", command.name, command.arguments)
+		}
+		for _, method := range []string{"POST", "PUT", "PATCH", "DELETE"} {
+			if containsString(command.arguments, method) {
+				t.Fatalf("governance issued mutation method %s: %v", method, command.arguments)
+			}
+		}
+	}
+	for _, index := range []int{0, 2, 3} {
+		if !containsString(runner.commands[index].arguments, "--paginate") ||
+			!containsString(runner.commands[index].arguments, "--slurp") {
+			t.Fatalf("list command did not paginate: %v", runner.commands[index].arguments)
+		}
+	}
+}
+
+func TestCheckedInGovernanceContractBlocksPublication(t *testing.T) {
+	t.Parallel()
+	root := repositoryRootForTest(t)
+	output := filepath.Join(t.TempDir(), "readiness.json")
+	runner := &scriptedRunner{responses: []scriptedResponse{
+		{name: "gh", contains: "environments?per_page=100", output: `[{"environments":[]}]`},
+		{name: "gh", contains: "rulesets?targets=tag&per_page=100", output: `[[]]`},
+	}}
+	err := runGovernanceCommand(context.Background(), []string{
+		"-repository", "Azure/azure-cosmos-driver",
+		"-config", filepath.Join(root, "eng", "release-governance.json"),
+		"-output", output,
+	}, runner)
+	if err == nil || !strings.Contains(err.Error(), "not_ready") {
+		t.Fatalf("runGovernanceCommand() error = %v, want not_ready", err)
+	}
+	var readiness governanceReadiness
+	contents, readErr := os.ReadFile(output)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if err := json.Unmarshal(contents, &readiness); err != nil {
+		t.Fatal(err)
+	}
+	if readiness.Status != "not_ready" {
+		t.Fatalf("readiness status = %q, want not_ready", readiness.Status)
+	}
+}
+
+func readyGovernanceConfig(t *testing.T) governanceConfig {
+	t.Helper()
+	config, err := readGovernanceConfig(filepath.Join(
+		repositoryRootForTest(t),
+		"eng",
+		"release-governance.json",
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.PublicationEnabled = true
+	config.Environment.OwnerConfirmedTeam = true
+	config.Environment.AdminBypassDisabled = true
+	config.TagRulesets.Creation.Actor.Mode = "github_app"
+	config.TagRulesets.Creation.Actor.ActorID = 12345
+	return config
+}
+
+func readyGovernanceSnapshot(t *testing.T, config governanceConfig) governanceSnapshot {
+	t.Helper()
+	var environment githubEnvironment
+	mustDecodeFixture(t, map[string]any{
+		"name": config.Environment.Name,
+		"protection_rules": []any{
+			map[string]any{
+				"type":                "required_reviewers",
+				"prevent_self_review": true,
+				"reviewers": []any{
+					map[string]any{
+						"type":     "Team",
+						"reviewer": map[string]any{"slug": config.Environment.ReviewerTeamSlug},
+					},
+				},
+			},
+		},
+		"deployment_branch_policy": map[string]any{
+			"protected_branches":     false,
+			"custom_branch_policies": true,
+		},
+	}, &environment)
+	creation := rulesetFixture(
+		t,
+		1,
+		config.TagRulesets.Creation.Name,
+		"tag",
+		"active",
+		config.TagRulesets.RefNamePatterns,
+		[]string{"creation"},
+		[]map[string]any{{
+			"actor_id":    config.TagRulesets.Creation.Actor.ActorID,
+			"actor_type":  config.TagRulesets.Creation.Actor.ActorType,
+			"bypass_mode": config.TagRulesets.Creation.Actor.BypassMode,
+		}},
+	)
+	immutability := rulesetFixture(
+		t,
+		2,
+		config.TagRulesets.Immutability.Name,
+		"tag",
+		"active",
+		config.TagRulesets.RefNamePatterns,
+		[]string{"update", "deletion", "non_fast_forward"},
+		nil,
+	)
+	return governanceSnapshot{
+		Environment: &environment,
+		BranchPolicies: []githubDeploymentBranchPolicy{{
+			Name: config.Environment.DefaultBranch,
+			Type: "branch",
+		}},
+		Rulesets: []githubRuleset{creation, immutability},
+	}
+}
+
+func rulesetFixture(
+	t *testing.T,
+	id int64,
+	name string,
+	target string,
+	enforcement string,
+	patterns []string,
+	rules []string,
+	actors []map[string]any,
+) githubRuleset {
+	t.Helper()
+	ruleValues := make([]map[string]any, 0, len(rules))
+	for _, rule := range rules {
+		ruleValues = append(ruleValues, map[string]any{"type": rule})
+	}
+	var ruleset githubRuleset
+	mustDecodeFixture(t, map[string]any{
+		"id":          id,
+		"name":        name,
+		"target":      target,
+		"source_type": "Repository",
+		"enforcement": enforcement,
+		"conditions": map[string]any{
+			"ref_name": map[string]any{
+				"include": patterns,
+				"exclude": []string{},
+			},
+		},
+		"rules":         ruleValues,
+		"bypass_actors": actors,
+	}, &ruleset)
+	return ruleset
+}
+
+func mustDecodeFixture(t *testing.T, source any, target any) {
+	t.Helper()
+	contents, err := json.Marshal(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(contents, target); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func containsSubstring(values []string, expected string) bool {
+	for _, value := range values {
+		if strings.Contains(value, expected) {
+			return true
+		}
+	}
+	return false
 }
 
 func repositoryRootForTest(t *testing.T) string {
@@ -1193,6 +1631,12 @@ type scriptedResponse struct {
 
 type scriptedRunner struct {
 	responses []scriptedResponse
+	commands  []scriptedCommand
+}
+
+type scriptedCommand struct {
+	name      string
+	arguments []string
 }
 
 func (runner *scriptedRunner) Run(
@@ -1201,6 +1645,10 @@ func (runner *scriptedRunner) Run(
 	name string,
 	arguments ...string,
 ) ([]byte, error) {
+	runner.commands = append(runner.commands, scriptedCommand{
+		name:      name,
+		arguments: append([]string(nil), arguments...),
+	})
 	if len(runner.responses) == 0 {
 		return nil, errors.New("unexpected command")
 	}
