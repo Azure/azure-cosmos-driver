@@ -14,16 +14,10 @@ lives there.
 
 ## Status
 
-> **This repository is under active bootstrap. Its contents and structure are
-> still being defined.**
-
-<!-- TODO: replace the placeholders below once the crew has agreed details. -->
-
-- **Release state:** _TBD_ — currently a manually built drop for local
-  development and testing.
-- **Supported platforms:** _TBD_ — see the table below for what exists today.
-- **Versioning / release tags:** _TBD_.
-- **Publishing pipeline (signed, released module zips):** _TBD_.
+This repository contains generated native-driver drops from the
+`azure_data_cosmos_driver_native` release pipeline. Each drop includes the
+platform modules listed below, `provenance.json`, `SHA256SUMS`, and generated
+SBOM metadata under `_manifest/`.
 
 ## Repository layout
 
