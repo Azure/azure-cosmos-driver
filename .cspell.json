@@ -1,0 +1,13 @@
+{
+  "ignoreWords": [
+    "azurecosmosdriver",
+    "GOARCH",
+    "LDFLAGS",
+    "libazurecosmosdriver",
+    "MSRC",
+    "reqwest",
+    "rustls",
+    "serde",
+    "syso"
+  ]
+}
