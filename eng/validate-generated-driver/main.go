@@ -33,21 +33,53 @@ var (
 )
 
 type provenance struct {
-	SchemaVersion          int                `json:"schema_version"`
-	SourceCommit           string             `json:"source_commit"`
-	NativeInterfaceCrate   string             `json:"native_interface_crate"`
-	NativeInterfaceVersion string             `json:"native_interface_version"`
-	RustDriverCrate        string             `json:"rust_driver_crate"`
-	RustDriverVersion      string             `json:"rust_driver_version"`
-	Targets                []provenanceTarget `json:"targets"`
+	SchemaVersion          int                 `json:"schema_version"`
+	SourceCommit           string              `json:"source_commit"`
+	NativeInterfaceCrate   string              `json:"native_interface_crate"`
+	NativeInterfaceVersion string              `json:"native_interface_version"`
+	RustDriverCrate        string              `json:"rust_driver_crate"`
+	RustDriverVersion      string              `json:"rust_driver_version"`
+	RustToolchain          provenanceToolchain `json:"rust_toolchain"`
+	Targets                []provenanceTarget  `json:"targets"`
 }
 
 type provenanceTarget struct {
-	ID                  string `json:"id"`
-	Triple              string `json:"triple"`
-	ModulePath          string `json:"module_path"`
-	StaticLibrarySHA256 string `json:"static_library_sha256"`
-	HeaderSHA256        string `json:"header_sha256"`
+	ID                  string          `json:"id"`
+	Triple              string          `json:"triple"`
+	ModulePath          string          `json:"module_path"`
+	StaticLibraryPath   string          `json:"static_library_path"`
+	StaticLibrarySHA256 string          `json:"static_library_sha256"`
+	HeaderSHA256        string          `json:"header_sha256"`
+	Toolchain           targetToolchain `json:"toolchain"`
+}
+
+type provenanceToolchain struct {
+	Provider                string `json:"provider"`
+	Manager                 string `json:"manager"`
+	ManagerVersion          string `json:"manager_version"`
+	Channel                 string `json:"channel"`
+	InstallerPackageVersion string `json:"installer_package_version"`
+	RustcRelease            string `json:"rustc_release"`
+	RustcCommitHash         string `json:"rustc_commit_hash"`
+	CargoVersion            string `json:"cargo_version"`
+}
+
+type targetToolchain struct {
+	SelectedToolchain        string           `json:"selected_toolchain"`
+	Sysroot                  string           `json:"sysroot"`
+	RustcExecutable          string           `json:"rustc_executable"`
+	CargoExecutable          string           `json:"cargo_executable"`
+	InstallerRustcExecutable string           `json:"installer_rustc_executable"`
+	InstallerCargoExecutable string           `json:"installer_cargo_executable"`
+	RustcVerboseVersion      string           `json:"rustc_verbose_version"`
+	Target                   string           `json:"target"`
+	Linker                   provenanceLinker `json:"linker"`
+}
+
+type provenanceLinker struct {
+	Command    string `json:"command"`
+	Executable string `json:"executable"`
+	Version    string `json:"version"`
 }
 
 type repository struct {
@@ -138,6 +170,9 @@ func validateIntegrityAgainstBase(root, baseRef string, output io.Writer) error 
 		}
 		if !sha256Hex.MatchString(target.HeaderSHA256) {
 			return fmt.Errorf("target %q has an invalid lowercase header_sha256", target.ID)
+		}
+		if err := validateTargetToolchain(repo.provenance.RustToolchain, target); err != nil {
+			return fmt.Errorf("target %q toolchain: %w", target.ID, err)
 		}
 		if releaseHeaderHash == "" {
 			releaseHeaderHash = target.HeaderSHA256
@@ -230,7 +265,7 @@ func readProvenanceAtRef(root, ref string) (provenance, bool, error) {
 	if err != nil {
 		return provenance{}, false, fmt.Errorf("read provenance.json at base ref %q: %w\n%s", ref, err, output)
 	}
-	manifest, err := decodeProvenance(bytes.NewReader(output))
+	manifest, err := decodeProvenanceDocument(bytes.NewReader(output), true)
 	if err != nil {
 		return provenance{}, false, fmt.Errorf("parse provenance.json at base ref %q: %w", ref, err)
 	}
@@ -293,6 +328,10 @@ func readProvenance(filename string) (provenance, error) {
 }
 
 func decodeProvenance(reader io.Reader) (provenance, error) {
+	return decodeProvenanceDocument(reader, false)
+}
+
+func decodeProvenanceDocument(reader io.Reader, allowLegacySchema bool) (provenance, error) {
 	decoder := json.NewDecoder(reader)
 	decoder.DisallowUnknownFields()
 	var manifest provenance
@@ -302,7 +341,7 @@ func decodeProvenance(reader io.Reader) (provenance, error) {
 	if err := ensureJSONEnd(decoder); err != nil {
 		return provenance{}, err
 	}
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 2 && !(allowLegacySchema && manifest.SchemaVersion == 1) {
 		return provenance{}, fmt.Errorf("unsupported provenance schema_version %d", manifest.SchemaVersion)
 	}
 	if !commitHex.MatchString(manifest.SourceCommit) {
@@ -317,10 +356,69 @@ func decodeProvenance(reader io.Reader) (provenance, error) {
 	if manifest.RustDriverCrate != "azure_data_cosmos_driver" {
 		return provenance{}, fmt.Errorf("unexpected rust_driver_crate %q", manifest.RustDriverCrate)
 	}
+	if manifest.SchemaVersion == 2 {
+		if err := validateProvenanceToolchain(manifest.RustToolchain); err != nil {
+			return provenance{}, fmt.Errorf("provenance rust_toolchain: %w", err)
+		}
+	}
 	if len(manifest.Targets) == 0 {
 		return provenance{}, errors.New("provenance targets must not be empty")
 	}
 	return manifest, nil
+}
+
+func validateProvenanceToolchain(toolchain provenanceToolchain) error {
+	required := map[string]string{
+		"provider":                  toolchain.Provider,
+		"manager":                   toolchain.Manager,
+		"manager_version":           toolchain.ManagerVersion,
+		"channel":                   toolchain.Channel,
+		"installer_package_version": toolchain.InstallerPackageVersion,
+		"rustc_release":             toolchain.RustcRelease,
+		"cargo_version":             toolchain.CargoVersion,
+	}
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not be empty", name)
+		}
+	}
+	if !commitHex.MatchString(toolchain.RustcCommitHash) {
+		return errors.New("rustc_commit_hash must be a lowercase 40-character Git commit")
+	}
+	return nil
+}
+
+func validateTargetToolchain(release provenanceToolchain, target provenanceTarget) error {
+	toolchain := target.Toolchain
+	required := map[string]string{
+		"selected_toolchain":         toolchain.SelectedToolchain,
+		"sysroot":                    toolchain.Sysroot,
+		"rustc_executable":           toolchain.RustcExecutable,
+		"cargo_executable":           toolchain.CargoExecutable,
+		"installer_rustc_executable": toolchain.InstallerRustcExecutable,
+		"installer_cargo_executable": toolchain.InstallerCargoExecutable,
+		"rustc_verbose_version":      toolchain.RustcVerboseVersion,
+		"target":                     toolchain.Target,
+		"linker.command":             toolchain.Linker.Command,
+		"linker.executable":          toolchain.Linker.Executable,
+		"linker.version":             toolchain.Linker.Version,
+	}
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s must not be empty", name)
+		}
+	}
+	if toolchain.SelectedToolchain != release.Channel {
+		return fmt.Errorf(
+			"selected_toolchain %q does not match release channel %q",
+			toolchain.SelectedToolchain,
+			release.Channel,
+		)
+	}
+	if toolchain.Target != target.Triple {
+		return fmt.Errorf("target %q does not match target triple %q", toolchain.Target, target.Triple)
+	}
+	return nil
 }
 
 func validateContinuity(base, current provenance) error {
@@ -374,7 +472,7 @@ func validateModulePath(modulePath string) error {
 }
 
 func validateGeneratedLayout(root string, targets []provenanceTarget) error {
-	expected := make(map[string]struct{}, len(targets)*5)
+	expected := make(map[string]struct{}, len(targets)*4)
 	for _, target := range targets {
 		parts := strings.Split(target.ModulePath, "/")
 		goarch, _, _ := strings.Cut(parts[1], "-")
@@ -382,8 +480,7 @@ func validateGeneratedLayout(root string, targets []provenanceTarget) error {
 			path.Join(target.ModulePath, "go.mod"),
 			path.Join(target.ModulePath, fmt.Sprintf("link_%s_%s.go", parts[0], goarch)),
 			path.Join(target.ModulePath, "azurecosmosdriver.h"),
-			path.Join(target.ModulePath, "native", "azurecosmosdriver.h"),
-			path.Join(target.ModulePath, "native", "libazurecosmosdriver.a"),
+			path.Join(target.ModulePath, "libazurecosmosdriver.a"),
 		} {
 			expected[relative] = struct{}{}
 		}
@@ -409,6 +506,14 @@ func validateGeneratedLayout(root string, targets []provenanceTarget) error {
 				return fmt.Errorf("generated path is a symbolic link: %q", relative)
 			}
 			if entry.IsDir() {
+				if strings.HasSuffix(relative, "/native") {
+					modulePath := strings.TrimSuffix(relative, "/native")
+					for _, target := range targets {
+						if target.ModulePath == modulePath {
+							return fmt.Errorf("target %q contains the removed native directory", target.ID)
+						}
+					}
+				}
 				return nil
 			}
 			if !entry.Type().IsRegular() {
@@ -428,10 +533,13 @@ func validateGeneratedLayout(root string, targets []provenanceTarget) error {
 
 func validateModule(root string, target provenanceTarget) error {
 	moduleDirectory := filepath.Join(root, filepath.FromSlash(target.ModulePath))
+	staticLibraryRelative, err := staticLibraryPath(target)
+	if err != nil {
+		return fmt.Errorf("target %q: %w", target.ID, err)
+	}
 	requiredFiles := map[string]string{
-		"static library": filepath.Join(moduleDirectory, "native", "libazurecosmosdriver.a"),
+		"static library": filepath.Join(root, filepath.FromSlash(staticLibraryRelative)),
 		"root header":    filepath.Join(moduleDirectory, "azurecosmosdriver.h"),
-		"native header":  filepath.Join(moduleDirectory, "native", "azurecosmosdriver.h"),
 	}
 	for description, filename := range requiredFiles {
 		if err := requireRegularFile(root, filename); err != nil {
@@ -446,7 +554,6 @@ func validateModule(root string, target provenanceTarget) error {
 	}{
 		{"static library", requiredFiles["static library"], target.StaticLibrarySHA256},
 		{"root header", requiredFiles["root header"], target.HeaderSHA256},
-		{"native header", requiredFiles["native header"], target.HeaderSHA256},
 	}
 	for _, check := range hashChecks {
 		actual, err := hashFile(check.filename)
@@ -493,9 +600,6 @@ func validateLinkFile(target provenanceTarget, filename string) error {
 	requiredText := []string{
 		"// Code generated by New-GoModules.ps1; DO NOT EDIT.",
 		fmt.Sprintf("//go:build cgo && %s && %s", goos, goarch),
-		"#cgo LDFLAGS:",
-		"-L${SRCDIR}/native",
-		"-lazurecosmosdriver",
 		`#include "azurecosmosdriver.h"`,
 		`import "C"`,
 	}
@@ -503,6 +607,35 @@ func validateLinkFile(target provenanceTarget, filename string) error {
 		if !bytes.Contains(contents, []byte(required)) {
 			return fmt.Errorf("target %q link file %q is missing %q", target.ID, filepath.Base(filename), required)
 		}
+	}
+	ldflags, err := parseCgoLDFlags(contents)
+	if err != nil {
+		return fmt.Errorf("target %q link file %q: %w", target.ID, filepath.Base(filename), err)
+	}
+	hasModuleSearchPath := false
+	hasDriverLibrary := false
+	for _, ldflag := range ldflags {
+		switch ldflag {
+		case "-L${SRCDIR}":
+			hasModuleSearchPath = true
+		case "-lazurecosmosdriver":
+			hasDriverLibrary = true
+		default:
+			if strings.HasPrefix(ldflag, "-L${SRCDIR}") {
+				return fmt.Errorf(
+					"target %q link file %q contains unexpected source-relative library search path %q",
+					target.ID,
+					filepath.Base(filename),
+					ldflag,
+				)
+			}
+		}
+	}
+	if !hasModuleSearchPath {
+		return fmt.Errorf("target %q link file %q is missing exact linker flag %q", target.ID, filepath.Base(filename), "-L${SRCDIR}")
+	}
+	if !hasDriverLibrary {
+		return fmt.Errorf("target %q link file %q is missing exact linker flag %q", target.ID, filepath.Base(filename), "-lazurecosmosdriver")
 	}
 
 	command := exec.Command("gofmt", "-d", filename)
@@ -514,6 +647,25 @@ func validateLinkFile(target provenanceTarget, filename string) error {
 		return fmt.Errorf("target %q link file is not gofmt-formatted:\n%s", target.ID, diff)
 	}
 	return nil
+}
+
+func parseCgoLDFlags(contents []byte) ([]string, error) {
+	const prefix = "// #cgo LDFLAGS:"
+	var flags []string
+	for _, line := range strings.Split(string(contents), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		if flags != nil {
+			return nil, errors.New("contains multiple #cgo LDFLAGS directives")
+		}
+		flags = strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, prefix)))
+	}
+	if flags == nil {
+		return nil, errors.New("is missing a #cgo LDFLAGS directive")
+	}
+	return flags, nil
 }
 
 func validateGoModule(modulePath, moduleDirectory string) error {
@@ -550,7 +702,10 @@ func validateGoModule(modulePath, moduleDirectory string) error {
 func validateChecksums(repo repository) error {
 	expected := make(map[string]string, len(repo.provenance.Targets))
 	for _, target := range repo.provenance.Targets {
-		relative := path.Join(target.ModulePath, "native", "libazurecosmosdriver.a")
+		relative, err := staticLibraryPath(target)
+		if err != nil {
+			return fmt.Errorf("target %q: %w", target.ID, err)
+		}
 		expected[relative] = target.StaticLibrarySHA256
 	}
 
@@ -605,6 +760,21 @@ func validateChecksums(repo repository) error {
 		}
 	}
 	return nil
+}
+
+func staticLibraryPath(target provenanceTarget) (string, error) {
+	expected := path.Join(target.ModulePath, "libazurecosmosdriver.a")
+	if target.StaticLibraryPath != expected {
+		return "", fmt.Errorf(
+			"static_library_path is %q; expected %q",
+			target.StaticLibraryPath,
+			expected,
+		)
+	}
+	if err := validateRelativeFilePath(target.StaticLibraryPath); err != nil {
+		return "", fmt.Errorf("static_library_path: %w", err)
+	}
+	return target.StaticLibraryPath, nil
 }
 
 func validateRelativeFilePath(relative string) error {
@@ -722,7 +892,46 @@ func validateNativeSmoke(root string, output io.Writer) error {
 	if err := runGo(workDirectory, "run", "-mod=mod", "."); err != nil {
 		return err
 	}
-	fmt.Fprintln(output, "Linux AMD64 module consumer linked, ran, and matched the native ABI version.")
+	if err := runGo(workDirectory, "mod", "vendor"); err != nil {
+		return err
+	}
+	if err := validateVendoredModule(workDirectory, moduleImport, moduleDirectory); err != nil {
+		return err
+	}
+	if err := runGo(workDirectory, "run", "-mod=vendor", "."); err != nil {
+		return err
+	}
+	fmt.Fprintln(output, "Linux AMD64 direct and vendored consumers linked, ran, and matched the native ABI version.")
+	return nil
+}
+
+func validateVendoredModule(workDirectory, moduleImport, moduleDirectory string) error {
+	vendoredModule := filepath.Join(workDirectory, "vendor", filepath.FromSlash(moduleImport))
+	for _, relative := range []string{"azurecosmosdriver.h", "libazurecosmosdriver.a"} {
+		source := filepath.Join(moduleDirectory, relative)
+		vendored := filepath.Join(vendoredModule, relative)
+		if err := requireRegularFile(workDirectory, vendored); err != nil {
+			return fmt.Errorf("vendored module %q: %w", moduleImport, err)
+		}
+		sourceHash, err := hashFile(source)
+		if err != nil {
+			return err
+		}
+		vendoredHash, err := hashFile(vendored)
+		if err != nil {
+			return err
+		}
+		if sourceHash != vendoredHash {
+			return fmt.Errorf("vendored module %q file %q differs from the generated module", moduleImport, relative)
+		}
+	}
+
+	legacyArchive := filepath.Join(vendoredModule, "native", "libazurecosmosdriver.a")
+	if _, err := os.Lstat(legacyArchive); err == nil {
+		return fmt.Errorf("vendored module %q contains an obsolete nested archive", moduleImport)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect obsolete vendored archive: %w", err)
+	}
 	return nil
 }
 
