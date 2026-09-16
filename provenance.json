@@ -1,0 +1,135 @@
+{
+  "schema_version": 2,
+  "source_commit": "db4df3039eebd33bd2e587164e9a54e6f2ffb65b",
+  "native_interface_crate": "azure_data_cosmos_driver_native",
+  "native_interface_version": "0.1.0",
+  "rust_driver_crate": "azure_data_cosmos_driver",
+  "rust_driver_version": "0.8.0",
+  "rust_toolchain": {
+    "provider": "microsoft",
+    "manager": "msrustup",
+    "manager_version": "msrustup 5.7.1-20260901.1",
+    "channel": "ms-prod-1.95",
+    "installer_package_version": "1.95.0-ms-20260618.5",
+    "rustc_release": "1.95.0",
+    "rustc_commit_hash": "ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7",
+    "cargo_version": "cargo 1.95.0 (1.95.0-ms-20260618.5+ed80dadd6a)"
+  },
+  "targets": [
+    {
+      "id": "linux-amd64-glibc",
+      "triple": "x86_64-unknown-linux-gnu",
+      "module_path": "linux/amd64",
+      "static_library_path": "linux/amd64/libazurecosmosdriver.a",
+      "static_library_sha256": "6b0a24b9c02611d7b4d3176d99becd14eab689b6a6969b9593d303bb4a53d703",
+      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "toolchain": {
+        "selected_toolchain": "ms-prod-1.95",
+        "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
+        "rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/rustc /home/cloudtest/.cargo/bin/rustc",
+        "cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/cargo /home/cloudtest/.cargo/bin/cargo",
+        "installer_rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/rustc",
+        "installer_cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/cargo",
+        "rustc_verbose_version": "rustc 1.95.0 (ed80dadd6a 2026-06-18) (1.95.0-ms-20260618.5+ed80dadd6a)\nbinary: rustc\ncommit-hash: ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nmanifest-channel: prod\nLLVM version: 22.1.2",
+        "target": "x86_64-unknown-linux-gnu",
+        "linker": {
+          "command": "gcc",
+          "executable": "/usr/bin/gcc /bin/gcc",
+          "version": "gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+        }
+      }
+    },
+    {
+      "id": "linux-arm64-glibc",
+      "triple": "aarch64-unknown-linux-gnu",
+      "module_path": "linux/arm64",
+      "static_library_path": "linux/arm64/libazurecosmosdriver.a",
+      "static_library_sha256": "664dfb083c7cab924a7e6e57b9d8f8378ef081858631d42f324be4994770ea0c",
+      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "toolchain": {
+        "selected_toolchain": "ms-prod-1.95",
+        "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
+        "rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/rustc /home/cloudtest/.cargo/bin/rustc",
+        "cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/cargo /home/cloudtest/.cargo/bin/cargo",
+        "installer_rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/rustc",
+        "installer_cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/cargo",
+        "rustc_verbose_version": "rustc 1.95.0 (ed80dadd6a 2026-06-18) (1.95.0-ms-20260618.5+ed80dadd6a)\nbinary: rustc\ncommit-hash: ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nmanifest-channel: prod\nLLVM version: 22.1.2",
+        "target": "aarch64-unknown-linux-gnu",
+        "linker": {
+          "command": "aarch64-linux-gnu-gcc",
+          "executable": "/usr/bin/aarch64-linux-gnu-gcc /bin/aarch64-linux-gnu-gcc",
+          "version": "aarch64-linux-gnu-gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+        }
+      }
+    },
+    {
+      "id": "darwin-arm64",
+      "triple": "aarch64-apple-darwin",
+      "module_path": "darwin/arm64",
+      "static_library_path": "darwin/arm64/libazurecosmosdriver.a",
+      "static_library_sha256": "282d09628db44798c3c7455a5dd57afe66a2aaba7043140f48e358b780dbd573",
+      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "toolchain": {
+        "selected_toolchain": "ms-prod-1.95",
+        "sysroot": "/Users/runner/work/_temp/msrustup_home/packages/rust.tools.stable-llvm-aarch64-apple-darwin.1.95.0-ms-20260618.5/tools",
+        "rustc_executable": "/Users/runner/work/_temp/msrustup_home/multiplexers/bin/rustc /Users/runner/.cargo/bin/rustc",
+        "cargo_executable": "/Users/runner/work/_temp/msrustup_home/multiplexers/bin/cargo /Users/runner/.cargo/bin/cargo",
+        "installer_rustc_executable": "/Users/runner/work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/rustc",
+        "installer_cargo_executable": "/Users/runner/work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/cargo",
+        "rustc_verbose_version": "rustc 1.95.0 (ed80dadd6a 2026-06-18) (1.95.0-ms-20260618.5+ed80dadd6a)\nbinary: rustc\ncommit-hash: ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7\ncommit-date: 2026-06-18\nhost: aarch64-apple-darwin\nrelease: 1.95.0\nmanifest-channel: prod\nLLVM version: 22.1.2",
+        "target": "aarch64-apple-darwin",
+        "linker": {
+          "command": "clang",
+          "executable": "/usr/bin/clang",
+          "version": "Apple clang version 17.0.0 (clang-1700.0.13.5)\nTarget: arm64-apple-darwin24.6.0\nThread model: posix\nInstalledDir: /Applications/Xcode_16.4.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+        }
+      }
+    },
+    {
+      "id": "linux-amd64-musl",
+      "triple": "x86_64-unknown-linux-musl",
+      "module_path": "linux/amd64-musl",
+      "static_library_path": "linux/amd64-musl/libazurecosmosdriver.a",
+      "static_library_sha256": "92afe50043b17855bb686df14494467908663aa01fee876da784631765da5448",
+      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "toolchain": {
+        "selected_toolchain": "ms-prod-1.95",
+        "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
+        "rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/rustc /home/cloudtest/.cargo/bin/rustc",
+        "cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/cargo /home/cloudtest/.cargo/bin/cargo",
+        "installer_rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/rustc",
+        "installer_cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/cargo",
+        "rustc_verbose_version": "rustc 1.95.0 (ed80dadd6a 2026-06-18) (1.95.0-ms-20260618.5+ed80dadd6a)\nbinary: rustc\ncommit-hash: ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nmanifest-channel: prod\nLLVM version: 22.1.2",
+        "target": "x86_64-unknown-linux-musl",
+        "linker": {
+          "command": "musl-gcc",
+          "executable": "/usr/bin/musl-gcc /bin/musl-gcc",
+          "version": "x86_64-linux-gnu-gcc (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nCopyright (C) 2021 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+        }
+      }
+    },
+    {
+      "id": "linux-arm64-musl",
+      "triple": "aarch64-unknown-linux-musl",
+      "module_path": "linux/arm64-musl",
+      "static_library_path": "linux/arm64-musl/libazurecosmosdriver.a",
+      "static_library_sha256": "b24f33f5de5e5d9a0988021bd10be0421365e1337691bdb611cacfd0098945bf",
+      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "toolchain": {
+        "selected_toolchain": "ms-prod-1.95",
+        "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
+        "rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/rustc /home/cloudtest/.cargo/bin/rustc",
+        "cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/multiplexers/bin/cargo /home/cloudtest/.cargo/bin/cargo",
+        "installer_rustc_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/rustc",
+        "installer_cargo_executable": "/mnt/vss/_work/_temp/msrustup_home/toolchains/ms-prod-1.95/bin/cargo",
+        "rustc_verbose_version": "rustc 1.95.0 (ed80dadd6a 2026-06-18) (1.95.0-ms-20260618.5+ed80dadd6a)\nbinary: rustc\ncommit-hash: ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7\ncommit-date: 2026-06-18\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nmanifest-channel: prod\nLLVM version: 22.1.2",
+        "target": "aarch64-unknown-linux-musl",
+        "linker": {
+          "command": "aarch64-linux-musl-gcc",
+          "executable": "/mnt/vss/_work/_temp/aarch64-linux-musl/output/bin/aarch64-linux-musl-gcc",
+          "version": "aarch64-linux-musl-gcc (GCC) 10.3.0\nCopyright (C) 2020 Free Software Foundation, Inc.\nThis is free software; see the source for copying conditions.  There is NO\nwarranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE."
+        }
+      }
+    }
+  ]
+}
