@@ -1,0 +1,21 @@
+# Azure Cosmos DB Native Driver
+
+This repository distributes prebuilt native driver static archives generated
+from the Azure SDK for Rust source repository:
+
+<https://github.com/Azure/azure-sdk-for-rust>
+
+The distributed archives may include object code from open-source Rust crates
+used transitively by the Cosmos DB native driver, including but not limited to
+crates such as tokio, rustls, reqwest, h2, serde, serde_json, futures, url,
+base64, bytes, uuid, and tracing. These dependencies are generally licensed
+under MIT, Apache-2.0, or dual MIT/Apache-2.0 terms.
+
+The authoritative dependency graph for a release is the Cargo dependency graph of
+the source commit identified in provenance.json. Release artifacts also include
+SHA256SUMS and generated SBOM metadata under _manifest/ so consumers can verify
+the distributed archives and inspect the dependency inventory for the exact
+release.
+
+Third-party license notices from dependency packages must remain subject to
+their respective package license terms.
