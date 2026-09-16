@@ -31,7 +31,7 @@ func TestValidateIntegrityGeneratedTargetMatrix(t *testing.T) {
 }
 
 func TestValidateIntegrityRejectsLegacySchema(t *testing.T) {
-	root := writeMatrixFixture(t)
+	root := writeFixture(t)
 	manifest := readTestProvenance(t, root)
 	manifest.SchemaVersion = 1
 	writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
@@ -42,7 +42,7 @@ func TestValidateIntegrityRejectsLegacySchema(t *testing.T) {
 	}
 }
 
-func TestValidateIntegrityRejectsInvalidFlatLayout(t *testing.T) {
+func TestValidateIntegrityRejectsInvalidSchemaTwoLayout(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, string)
@@ -58,7 +58,7 @@ func TestValidateIntegrityRejectsInvalidFlatLayout(t *testing.T) {
 			want: "static_library_path is",
 		},
 		{
-			name: "wrong static library path",
+			name: "legacy static library path",
 			mutate: func(t *testing.T, root string) {
 				manifest := readTestProvenance(t, root)
 				manifest.Targets[0].StaticLibraryPath = "linux/amd64/native/libazurecosmosdriver.a"
@@ -169,10 +169,31 @@ func TestValidateIntegrityRejectsInvalidFlatLayout(t *testing.T) {
 			},
 			want: "undeclared archive",
 		},
+		{
+			name: "incorrect linker search path",
+			mutate: func(t *testing.T, root string) {
+				filename := filepath.Join(root, "linux", "amd64", "link_linux_amd64.go")
+				contents, err := os.ReadFile(filename)
+				if err != nil {
+					t.Fatal(err)
+				}
+				writeTestFile(t, filename, strings.ReplaceAll(string(contents), "-L${SRCDIR}", "-L${SRCDIR}/bogus"))
+			},
+			want: "unexpected source-relative library search path",
+		},
+		{
+			name: "target toolchain mismatch",
+			mutate: func(t *testing.T, root string) {
+				manifest := readTestProvenance(t, root)
+				manifest.Targets[0].Toolchain.Target = "aarch64-unknown-linux-gnu"
+				writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
+			},
+			want: "does not match target triple",
+		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
-			root := writeMatrixFixture(t)
+			root := writeFixture(t)
 			test.mutate(t, root)
 			err := validateIntegrity(root, io.Discard)
 			if err == nil || !strings.Contains(err.Error(), test.want) {
@@ -287,6 +308,72 @@ func TestValidateIntegrityAgainstBaseRejectsPublishedTargetRemoval(t *testing.T)
 	}
 }
 
+func TestValidateVendoredModule(t *testing.T) {
+	workDirectory := t.TempDir()
+	moduleDirectory := t.TempDir()
+	moduleImport := moduleRoot + "/linux/amd64"
+	for _, file := range []struct {
+		name     string
+		contents string
+	}{
+		{"azurecosmosdriver.h", "header"},
+		{"libazurecosmosdriver.a", "archive"},
+	} {
+		writeTestFile(t, filepath.Join(moduleDirectory, file.name), file.contents)
+		writeTestFile(
+			t,
+			filepath.Join(workDirectory, "vendor", filepath.FromSlash(moduleImport), file.name),
+			file.contents,
+		)
+	}
+
+	if err := validateVendoredModule(workDirectory, moduleImport, moduleDirectory); err != nil {
+		t.Fatalf("validateVendoredModule() error = %v", err)
+	}
+
+	writeTestFile(
+		t,
+		filepath.Join(workDirectory, "vendor", filepath.FromSlash(moduleImport), "libazurecosmosdriver.a"),
+		"tampered",
+	)
+	err := validateVendoredModule(workDirectory, moduleImport, moduleDirectory)
+	if err == nil || !strings.Contains(err.Error(), "differs from the generated module") {
+		t.Fatalf("validateVendoredModule() error = %v, want hash mismatch", err)
+	}
+}
+
+func TestGoModVendorPreservesNativeFiles(t *testing.T) {
+	root := writeFixture(t)
+	moduleDirectory := filepath.Join(root, "linux", "amd64")
+	moduleImport := moduleRoot + "/linux/amd64"
+	workDirectory := t.TempDir()
+	writeTestFile(
+		t,
+		filepath.Join(workDirectory, "go.mod"),
+		fmt.Sprintf(
+			"module cosmos-driver-vendor-test\n\ngo 1.25.0\n\nrequire %s v0.0.0\n\nreplace %s => %s\n",
+			moduleImport,
+			moduleImport,
+			filepath.ToSlash(moduleDirectory),
+		),
+	)
+	writeTestFile(
+		t,
+		filepath.Join(workDirectory, "main.go"),
+		fmt.Sprintf("package main\n\nimport _ %q\n\nfunc main() {}\n", moduleImport),
+	)
+
+	command := exec.Command("go", "mod", "vendor")
+	command.Dir = workDirectory
+	command.Env = append(os.Environ(), "CGO_ENABLED=1", "GOOS=linux", "GOARCH=amd64")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("go mod vendor failed: %v\n%s", err, output)
+	}
+	if err := validateVendoredModule(workDirectory, moduleImport, moduleDirectory); err != nil {
+		t.Fatalf("validateVendoredModule() after go mod vendor error = %v", err)
+	}
+}
+
 func writeFixture(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
@@ -318,6 +405,7 @@ import "C"
 		StaticLibraryPath:   "linux/amd64/libazurecosmosdriver.a",
 		StaticLibrarySHA256: testHash(archive),
 		HeaderSHA256:        testHash(header),
+		Toolchain:           testTargetToolchain("x86_64-unknown-linux-gnu"),
 	}
 	manifest := provenance{
 		SchemaVersion:          2,
@@ -326,6 +414,7 @@ import "C"
 		NativeInterfaceVersion: "0.1.0",
 		RustDriverCrate:        "azure_data_cosmos_driver",
 		RustDriverVersion:      "0.1.0",
+		RustToolchain:          testProvenanceToolchain(),
 		Targets:                []provenanceTarget{target},
 	}
 	writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
@@ -369,10 +458,7 @@ func writeMatrixFixtureAt(t *testing.T, root string) {
 		moduleDirectory := filepath.Join(root, filepath.FromSlash(spec.modulePath))
 		writeTestFile(t, filepath.Join(moduleDirectory, "go.mod"), fmt.Sprintf("module github.com/Azure/azure-cosmos-driver/%s\n\ngo 1.25.0\n", spec.modulePath))
 		writeTestFile(t, filepath.Join(moduleDirectory, "azurecosmosdriver.h"), header)
-		archivePath := filepath.Join(moduleDirectory, "libazurecosmosdriver.a")
-		linkSearchPath := "-L${SRCDIR}"
-		staticLibraryPath := filepath.ToSlash(filepath.Join(spec.modulePath, "libazurecosmosdriver.a"))
-		writeTestFile(t, archivePath, archive)
+		writeTestFile(t, filepath.Join(moduleDirectory, "libazurecosmosdriver.a"), archive)
 		writeTestFile(t, filepath.Join(moduleDirectory, fmt.Sprintf("link_%s_%s.go", parts[0], goarch)), fmt.Sprintf(`// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
@@ -383,12 +469,13 @@ func writeMatrixFixtureAt(t *testing.T, root string) {
 
 package driver
 
-// #cgo LDFLAGS: %s -lazurecosmosdriver
+// #cgo LDFLAGS: -L${SRCDIR} -lazurecosmosdriver
 // #include "azurecosmosdriver.h"
 import "C"
-`, spec.id, spec.triple, parts[0], goarch, linkSearchPath))
+`, spec.id, spec.triple, parts[0], goarch))
 
 		archiveHash := testHash(archive)
+		staticLibraryPath := filepath.ToSlash(filepath.Join(spec.modulePath, "libazurecosmosdriver.a"))
 		targets = append(targets, provenanceTarget{
 			ID:                  spec.id,
 			Triple:              spec.triple,
@@ -396,6 +483,7 @@ import "C"
 			StaticLibraryPath:   staticLibraryPath,
 			StaticLibrarySHA256: archiveHash,
 			HeaderSHA256:        testHash(header),
+			Toolchain:           testTargetToolchain(spec.triple),
 		})
 		fmt.Fprintf(&checksums, "%s  %s\n", archiveHash, staticLibraryPath)
 	}
@@ -406,6 +494,7 @@ import "C"
 		NativeInterfaceVersion: "0.1.0",
 		RustDriverCrate:        "azure_data_cosmos_driver",
 		RustDriverVersion:      "0.1.0",
+		RustToolchain:          testProvenanceToolchain(),
 		Targets:                targets,
 	})
 	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
@@ -455,6 +544,37 @@ func commitFixture(t *testing.T, root string) {
 		if output, err := command.CombinedOutput(); err != nil {
 			t.Fatalf("git %s failed: %v\n%s", strings.Join(arguments, " "), err, output)
 		}
+	}
+}
+
+func testProvenanceToolchain() provenanceToolchain {
+	return provenanceToolchain{
+		Provider:                "microsoft",
+		Manager:                 "msrustup",
+		ManagerVersion:          "msrustup 5.7.1-20260901.1",
+		Channel:                 "ms-prod-1.95",
+		InstallerPackageVersion: "1.95.0-ms-20260618.5",
+		RustcRelease:            "1.95.0",
+		RustcCommitHash:         "ed80dadd6a554c8b82a54f4b9a22ec7b36b514a7",
+		CargoVersion:            "cargo 1.95.0 (1.95.0-ms-20260618.5+ed80dadd6a)",
+	}
+}
+
+func testTargetToolchain(triple string) targetToolchain {
+	return targetToolchain{
+		SelectedToolchain:        "ms-prod-1.95",
+		Sysroot:                  "/toolchain",
+		RustcExecutable:          "/toolchain/bin/rustc",
+		CargoExecutable:          "/toolchain/bin/cargo",
+		InstallerRustcExecutable: "/installer/bin/rustc",
+		InstallerCargoExecutable: "/installer/bin/cargo",
+		RustcVerboseVersion:      "rustc 1.95.0 (ed80dadd6a 2026-06-18)",
+		Target:                   triple,
+		Linker: provenanceLinker{
+			Command:    "cc",
+			Executable: "/usr/bin/cc",
+			Version:    "cc 1.0",
+		},
 	}
 }
 
