@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "publication_enabled": false,
+  "environment": {
+    "name": "driver-release",
+    "default_branch": "main",
+    "reviewer_team_slug": "azure-cosmos-sdk",
+    "prevent_self_review": true,
+    "owner_confirmed_reviewer_team": false,
+    "admin_bypass_disabled": false
+  },
+  "tag_rulesets": {
+    "ref_name_patterns": [
+      "refs/tags/linux/amd64/v*",
+      "refs/tags/linux/arm64/v*",
+      "refs/tags/linux/amd64-musl/v*",
+      "refs/tags/linux/arm64-musl/v*",
+      "refs/tags/darwin/arm64/v*"
+    ],
+    "creation": {
+      "name": "generated-driver-tag-creation",
+      "actor": {
+        "mode": "unresolved",
+        "actor_type": "Integration",
+        "actor_id": 0,
+        "bypass_mode": "always"
+      }
+    },
+    "immutability": {
+      "name": "generated-driver-tag-immutability"
+    }
+  }
+}

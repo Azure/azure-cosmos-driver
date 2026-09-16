@@ -1,0 +1,262 @@
+name: Publish generated driver release
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Merged generated-driver pull request number
+        required: true
+        type: string
+      version:
+        description: Stable module version without a leading v (for example, 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: generated-driver-release
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    name: Pre-approval release plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      merge_sha: ${{ steps.plan.outputs.merge_sha }}
+      plan_digest: ${{ steps.plan.outputs.plan_digest }}
+      plan_json: ${{ steps.plan.outputs.plan_json }}
+      status: ${{ steps.plan.outputs.status }}
+      governance_status: ${{ steps.governance.outputs.status }}
+    steps:
+      - name: Require default-branch dispatch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Run this publication workflow from the repository default branch."
+            exit 1
+          fi
+
+      - name: Check out trusted release tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: control
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Build trusted release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/release-planner" ./control/eng/plan-generated-driver-release/main.go
+          go build -o "$RUNNER_TEMP/generated-driver-validator" ./control/eng/validate-generated-driver/main.go
+
+      - name: Resolve merged pull request
+        id: source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" resolve-pr \
+            -repository "$REPOSITORY" \
+            -pr-number "$PR_NUMBER" \
+            -default-branch "$DEFAULT_BRANCH" \
+            -version "$REQUESTED_VERSION" \
+            -output "$RUNNER_TEMP/pr-metadata.json" \
+            -plan-output "$GITHUB_WORKSPACE/control/generated-driver-release-plan.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Check out exact merged candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          path: candidate
+          persist-credentials: false
+          ref: ${{ steps.source.outputs.merge_sha }}
+
+      - name: Build pre-approval plan
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" plan \
+            -root "$GITHUB_WORKSPACE/candidate" \
+            -repository "$REPOSITORY" \
+            -version "$REQUESTED_VERSION" \
+            -pr-metadata "$RUNNER_TEMP/pr-metadata.json" \
+            -validator "$RUNNER_TEMP/generated-driver-validator" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-release-plan.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Check release governance readiness
+        id: governance
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" governance \
+            -repository "$REPOSITORY" \
+            -config "$GITHUB_WORKSPACE/control/eng/release-governance.json" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-governance-readiness.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Upload pre-approval plan
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: generated-driver-pre-approval-plan
+          path: |
+            control/generated-driver-release-plan.json
+            control/generated-driver-governance-readiness.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: Atomically publish five module tags
+    needs: plan
+    if: >-
+      ${{
+        needs.plan.outputs.governance_status == 'ready' &&
+        (needs.plan.outputs.status == 'eligible_to_publish' ||
+        needs.plan.outputs.status == 'already_published')
+      }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: driver-release
+    permissions:
+      contents: write
+      pull-requests: read
+    outputs:
+      publication_json: ${{ steps.publish.outputs.publication_json }}
+      status: ${{ steps.publish.outputs.status }}
+    steps:
+      - name: Check out trusted release tools
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: control
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Build trusted release tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/release-planner" ./control/eng/plan-generated-driver-release/main.go
+          go build -o "$RUNNER_TEMP/generated-driver-validator" ./control/eng/validate-generated-driver/main.go
+
+      - name: Recheck release governance after approval
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" governance \
+            -repository "$REPOSITORY" \
+            -config "$GITHUB_WORKSPACE/control/eng/release-governance.json" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-publish-governance-readiness.json" \
+            -summary "$GITHUB_STEP_SUMMARY"
+
+      - name: Resolve merged pull request again
+        id: source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" resolve-pr \
+            -repository "$REPOSITORY" \
+            -pr-number "$PR_NUMBER" \
+            -default-branch "$DEFAULT_BRANCH" \
+            -version "$REQUESTED_VERSION" \
+            -output "$RUNNER_TEMP/pr-metadata.json" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Check out exact merged candidate for publication
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          path: candidate
+          persist-credentials: true
+          ref: ${{ steps.source.outputs.merge_sha }}
+
+      - name: Restore approved plan
+        shell: bash
+        env:
+          APPROVED_PLAN_JSON: ${{ needs.plan.outputs.plan_json }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$APPROVED_PLAN_JSON" > "$RUNNER_TEMP/approved-plan.json"
+
+      - name: Revalidate and atomically publish
+        id: publish
+        shell: bash
+        env:
+          APPROVED_PLAN_DIGEST: ${{ needs.plan.outputs.plan_digest }}
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" publish \
+            -root "$GITHUB_WORKSPACE/candidate" \
+            -repository "$REPOSITORY" \
+            -version "$REQUESTED_VERSION" \
+            -pr-metadata "$RUNNER_TEMP/pr-metadata.json" \
+            -validator "$RUNNER_TEMP/generated-driver-validator" \
+            -approved-plan "$RUNNER_TEMP/approved-plan.json" \
+            -approved-plan-digest "$APPROVED_PLAN_DIGEST" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-publication-result.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Upload publication result
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: generated-driver-publication-result
+          path: |
+            control/generated-driver-publication-result.json
+            control/generated-driver-publish-governance-readiness.json
+          if-no-files-found: ignore
+          retention-days: 14

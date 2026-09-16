@@ -1,0 +1,117 @@
+name: Plan generated driver release
+
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Merged generated-driver pull request number
+        required: true
+        type: string
+      version:
+        description: Stable module version without a leading v (for example, 0.1.0)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  plan:
+    name: Read-only release plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      merge_sha: ${{ steps.plan.outputs.merge_sha || steps.source.outputs.merge_sha }}
+      plan_json: ${{ steps.plan.outputs.plan_json || steps.source.outputs.plan_json }}
+      status: ${{ steps.plan.outputs.status || steps.source.outputs.status }}
+    steps:
+      - name: Require default-branch dispatch
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
+            echo "::error::Run this release planner from the repository default branch."
+            exit 1
+          fi
+
+      - name: Check out trusted planner
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          path: control
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: "1.25.x"
+          cache: false
+
+      - name: Build trusted planning tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go build -o "$RUNNER_TEMP/release-planner" ./control/eng/plan-generated-driver-release/main.go
+          go build -o "$RUNNER_TEMP/generated-driver-validator" ./control/eng/validate-generated-driver/main.go
+
+      - name: Resolve merged pull request
+        id: source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" resolve-pr \
+            -repository "$REPOSITORY" \
+            -pr-number "$PR_NUMBER" \
+            -default-branch "$DEFAULT_BRANCH" \
+            -version "$REQUESTED_VERSION" \
+            -output "$RUNNER_TEMP/pr-metadata.json" \
+            -plan-output "$GITHUB_WORKSPACE/control/generated-driver-release-plan.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Check out exact merged candidate
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          fetch-tags: false
+          path: candidate
+          persist-credentials: false
+          ref: ${{ steps.source.outputs.merge_sha }}
+
+      - name: Build release plan
+        id: plan
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/release-planner" plan \
+            -root "$GITHUB_WORKSPACE/candidate" \
+            -repository "$REPOSITORY" \
+            -version "$REQUESTED_VERSION" \
+            -pr-metadata "$RUNNER_TEMP/pr-metadata.json" \
+            -validator "$RUNNER_TEMP/generated-driver-validator" \
+            -output "$GITHUB_WORKSPACE/control/generated-driver-release-plan.json" \
+            -summary "$GITHUB_STEP_SUMMARY" \
+            -github-output "$GITHUB_OUTPUT"
+
+      - name: Upload machine-readable release plan
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: generated-driver-release-plan
+          path: control/generated-driver-release-plan.json
+          if-no-files-found: ignore
+          retention-days: 14

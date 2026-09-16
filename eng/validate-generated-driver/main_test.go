@@ -67,6 +67,31 @@ func TestValidateIntegrityRejectsInvalidSchemaTwoLayout(t *testing.T) {
 			want: "static_library_path is",
 		},
 		{
+			name: "unsafe static library path",
+			mutate: func(t *testing.T, root string) {
+				manifest := readTestProvenance(t, root)
+				manifest.Targets[0].StaticLibraryPath = "../libazurecosmosdriver.a"
+				writeTestJSON(t, filepath.Join(root, "provenance.json"), manifest)
+			},
+			want: "static_library_path is",
+		},
+		{
+			name: "archive retained under native",
+			mutate: func(t *testing.T, root string) {
+				moduleDirectory := filepath.Join(root, "linux", "amd64")
+				if err := os.MkdirAll(filepath.Join(moduleDirectory, "native"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Rename(
+					filepath.Join(moduleDirectory, "libazurecosmosdriver.a"),
+					filepath.Join(moduleDirectory, "native", "libazurecosmosdriver.a"),
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+			want: "static library",
+		},
+		{
 			name: "stale native directory",
 			mutate: func(t *testing.T, root string) {
 				if err := os.MkdirAll(filepath.Join(root, "linux", "amd64", "native"), 0o755); err != nil {
@@ -90,9 +115,59 @@ func TestValidateIntegrityRejectsInvalidSchemaTwoLayout(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				writeTestFile(t, filename, strings.ReplaceAll(string(contents), "-L${SRCDIR}", "-L${SRCDIR}/native"))
+				writeTestFile(
+					t,
+					filename,
+					strings.ReplaceAll(string(contents), "-L${SRCDIR}", "-L${SRCDIR}/native"),
+				)
 			},
-			want: "unexpected source-relative library search path",
+			want: "references the removed native directory",
+		},
+		{
+			name: "root archive tampered",
+			mutate: func(t *testing.T, root string) {
+				writeTestFile(t, filepath.Join(root, "linux", "amd64", "libazurecosmosdriver.a"), "tampered")
+			},
+			want: "SHA256 mismatch",
+		},
+		{
+			name: "root header tampered",
+			mutate: func(t *testing.T, root string) {
+				writeTestFile(t, filepath.Join(root, "linux", "amd64", "azurecosmosdriver.h"), "tampered")
+			},
+			want: "root header SHA256 mismatch",
+		},
+		{
+			name: "root checksum hash disagrees with provenance",
+			mutate: func(t *testing.T, root string) {
+				manifest := readTestProvenance(t, root)
+				var checksums strings.Builder
+				for _, target := range manifest.Targets {
+					hash := target.StaticLibrarySHA256
+					if target.ModulePath == "linux/amd64" {
+						hash = strings.Repeat("0", 64)
+					}
+					fmt.Fprintf(&checksums, "%s  %s\n", hash, target.StaticLibraryPath)
+				}
+				writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
+			},
+			want: "SHA256SUMS and provenance.json disagree",
+		},
+		{
+			name: "root checksum path uses legacy layout",
+			mutate: func(t *testing.T, root string) {
+				manifest := readTestProvenance(t, root)
+				var checksums strings.Builder
+				for _, target := range manifest.Targets {
+					checksumPath := target.StaticLibraryPath
+					if target.ModulePath == "linux/amd64" {
+						checksumPath = "linux/amd64/native/libazurecosmosdriver.a"
+					}
+					fmt.Fprintf(&checksums, "%s  %s\n", target.StaticLibrarySHA256, checksumPath)
+				}
+				writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
+			},
+			want: "undeclared archive",
 		},
 		{
 			name: "incorrect linker search path",
@@ -128,30 +203,13 @@ func TestValidateIntegrityRejectsInvalidSchemaTwoLayout(t *testing.T) {
 	}
 }
 
-func TestValidateIntegrityAgainstBaseAllowsSchemaOneToSchemaTwoMigration(t *testing.T) {
+func TestValidateIntegrityAgainstBasePreservesSchema2Continuity(t *testing.T) {
 	root := writeMatrixFixture(t)
-	current := readTestProvenance(t, root)
-	contents, err := json.Marshal(current)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var base map[string]any
-	if err := json.Unmarshal(contents, &base); err != nil {
-		t.Fatal(err)
-	}
-	base["schema_version"] = float64(1)
-	delete(base, "rust_toolchain")
-	for _, target := range base["targets"].([]any) {
-		target := target.(map[string]any)
-		delete(target, "static_library_path")
-		delete(target, "toolchain")
-	}
-	writeTestJSON(t, filepath.Join(root, "provenance.json"), base)
 	commitFixture(t, root)
-	writeTestJSON(t, filepath.Join(root, "provenance.json"), current)
+	writeMatrixFixtureAt(t, root)
 
 	if err := validateIntegrityAgainstBase(root, "HEAD", io.Discard); err != nil {
-		t.Fatalf("validateIntegrityAgainstBase() migration error = %v", err)
+		t.Fatalf("validateIntegrityAgainstBase() error = %v", err)
 	}
 }
 
@@ -366,19 +424,29 @@ import "C"
 
 func writeMatrixFixture(t *testing.T) string {
 	t.Helper()
+	root := t.TempDir()
+	writeMatrixFixtureAt(t, root)
+	return root
+}
+
+func writeMatrixFixtureAt(t *testing.T, root string) {
+	t.Helper()
 	specs := []struct {
 		id         string
 		triple     string
 		modulePath string
 	}{
-		{"windows-amd64", "x86_64-pc-windows-gnu", "windows/amd64"},
 		{"linux-amd64-glibc", "x86_64-unknown-linux-gnu", "linux/amd64"},
 		{"linux-arm64-glibc", "aarch64-unknown-linux-gnu", "linux/arm64"},
 		{"linux-amd64-musl", "x86_64-unknown-linux-musl", "linux/amd64-musl"},
 		{"linux-arm64-musl", "aarch64-unknown-linux-musl", "linux/arm64-musl"},
 		{"darwin-arm64", "aarch64-apple-darwin", "darwin/arm64"},
 	}
-	root := t.TempDir()
+	for _, platform := range []string{"windows", "linux", "darwin"} {
+		if err := os.RemoveAll(filepath.Join(root, platform)); err != nil {
+			t.Fatal(err)
+		}
+	}
 	header := "#define AZURECOSMOSDRIVER_H_VERSION \"0.1.0\"\nconst char *cosmos_version(void);\n"
 	var targets []provenanceTarget
 	var checksums strings.Builder
@@ -429,7 +497,6 @@ import "C"
 		Targets:                targets,
 	})
 	writeTestFile(t, filepath.Join(root, "SHA256SUMS"), checksums.String())
-	return root
 }
 
 func readTestProvenance(t *testing.T, root string) provenance {

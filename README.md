@@ -13,12 +13,12 @@ crate in [`azure-sdk-for-rust`](https://github.com/Azure/azure-sdk-for-rust) —
 
 > **This repository is under active bootstrap. Its contents and structure are still being defined.**
 
-<!-- TODO: replace the placeholders below once the crew has agreed the details. -->
-
-- **Release state:** _TBD_ — currently a manually built drop for local development and testing.
+- **Release state:** generated-driver pull requests can be validated and planned for release. The
+  publication workflow is checked in but remains operationally disabled until governance is ready.
 - **Supported platforms:** _TBD_ — see the table below for what exists today.
-- **Versioning / release tags:** _TBD_.
-- **Publishing pipeline (signed, released module zips):** _TBD_.
+- **Versioning / release tags:** five lockstep, path-prefixed module tags (for example,
+  `linux/amd64/v0.1.0`).
+- **Signing and private-module download verification:** _TBD_.
 
 ## Repository layout
 
@@ -26,9 +26,11 @@ One Go module per `GOOS/GOARCH`, each shipping a prebuilt static library:
 
 | Platform (`GOOS/GOARCH`) | Module | State |
 |---|---|---|
-| `windows/amd64` | [`windows/amd64`](./windows/amd64) | Available |
-| `darwin/arm64` | `darwin/arm64` | In progress |
-| `linux/amd64`, `linux/arm64` | — | Not yet available |
+| `darwin/arm64` | `darwin/arm64` | Schema 2 release contract |
+| `linux/amd64` | `linux/amd64` | Schema 2 release contract |
+| `linux/arm64` | `linux/arm64` | Schema 2 release contract |
+| `linux/amd64-musl` | `linux/amd64-musl` | Schema 2 release contract |
+| `linux/arm64-musl` | `linux/arm64-musl` | Schema 2 release contract |
 
 Each target module has no Go API surface — it is **blank-imported** by the consuming package so that
 its `#cgo LDFLAGS` participate in the final program link. See each module's own `README.md` for build
@@ -61,6 +63,102 @@ go test ./eng/validate-generated-driver/main.go ./eng/validate-generated-driver/
 go run ./eng/validate-generated-driver/main.go integrity
 go run ./eng/validate-generated-driver/main.go native-smoke
 ```
+
+## Read-only release planning
+
+The
+[`Plan generated driver release`](./.github/workflows/plan-generated-driver-release.yml)
+manual workflow is Phase 1 of the release process. It accepts a merged generated-driver pull request
+number and a canonical stable `X.Y.Z` version without a leading `v`. It must be dispatched from the
+repository default branch so the planner and validator are built from trusted `main` content. The
+workflow derives the durable merge commit from GitHub, requires the pull request to target `main`,
+checks out that exact commit, verifies it is reachable from the current remote default branch, and runs
+the generated-driver integrity validator against the pull request's base SHA.
+
+The planner requires these five nested modules and proposes one lockstep tag for each:
+
+| Module | Proposed tag shape |
+|---|---|
+| `linux/amd64` | `linux/amd64/vX.Y.Z` |
+| `linux/arm64` | `linux/arm64/vX.Y.Z` |
+| `linux/amd64-musl` | `linux/amd64-musl/vX.Y.Z` |
+| `linux/arm64-musl` | `linux/arm64-musl/vX.Y.Z` |
+| `darwin/arm64` | `darwin/arm64/vX.Y.Z` |
+
+The requested version must match the native-interface version in `provenance.json` and every generated
+header. The independently versioned Rust driver version is reported in the plan but does not determine
+the Go module version. Major versions 2 and later are rejected because the module paths do not
+currently carry Go's required `/vN` suffix.
+
+The plan status is:
+
+- `eligible_to_publish` when all five proposed tags are absent.
+- `already_published` when all five tags, including annotated tags, resolve to the derived merge
+  commit.
+- `blocked` for partial publication, a tag at another commit, malformed tag state, invalid release
+  identity, or failed integrity/continuity checks.
+
+The workflow publishes a GitHub Step Summary and a non-sensitive JSON plan artifact. It has only
+`contents: read` and `pull-requests: read` permissions and **cannot publish, delete, or move tags or
+create a GitHub Release**.
+
+Because this is a private module repository, consumers must configure private-module authentication
+and `GOPRIVATE=github.com/Azure/azure-cosmos-driver` (or an appropriate broader pattern). The planner
+does not configure consumer credentials. Provenance and archive hashes are structurally and
+cryptographically cross-checked by the existing validator, but Phase 1 does not claim independent
+COSE signature verification; that remains a future repository-governance decision.
+
+## Atomic release publication
+
+The
+[`Publish generated driver release`](./.github/workflows/publish-generated-driver-release.yml)
+manual workflow is Phase 2. It accepts the same `pr_number` and canonical `version` inputs and first
+runs the complete read-only Phase 1 plan. The publication job uses the `driver-release` environment,
+where repository administrators can configure required reviewers and prevent self-review. The
+workflow is serialized with the `generated-driver-release` concurrency group and does not cancel an
+in-progress publication.
+
+The workflow defaults to read-only permissions. Only the environment-gated publication job receives
+`contents: write`; `pull-requests: read` is used to re-resolve the merged pull request. Both jobs build
+the planner, publisher, and integrity validator from the immutable default-branch commit that
+dispatched the workflow. The candidate merge commit is checked out only as data and no candidate
+scripts are executed. The authenticated candidate checkout is limited to the publication job because
+Git credentials are required for its single push.
+
+After approval, the publisher re-fetches the default branch, re-resolves the pull request, and reruns
+the integrity, release-identity, continuity, module, and remote-tag checks. The approved canonical
+plan digest must exactly match the fresh plan, including the PR, merge SHA, version, default-branch
+ancestry requirement, release identity, and five module tags. The observed default-branch tips are
+reported for auditability but excluded from the digest, so an unrelated `main` advance does not block
+publication while the target merge remains reachable. If all tags are absent, it creates five
+deterministic, unsigned annotated tags targeting the exact merge commit and invokes one command
+equivalent to:
+
+```text
+git push --atomic origin refs/tags/<module>/vX.Y.Z:refs/tags/<module>/vX.Y.Z ...
+```
+
+There is no sequential fallback. The publisher never forces, moves, or deletes a tag. If all five tags
+already resolve recursively to the expected merge commit, the run is an `already_published` no-op.
+Partial, mismatched, malformed, or drifted state is `blocked`. An ambiguous result after the one
+atomic push attempt is `indeterminate`; rerun only after inspecting the result, and a fresh rerun can
+then establish `already_published`. The workflow verifies all five remote refs after publication and
+emits a non-sensitive JSON result and GitHub Step Summary.
+
+The tags are currently unsigned because the repository has no established non-secret signing
+mechanism; configuring signing is an administrator governance decision. Private-module download
+verification also remains an integration gate until credentials or a private proxy can be configured
+without exposing tokens. Phase 2 does not create an aggregate tag or GitHub Release.
+
+Publication remains operationally disabled until repository owners complete the environment,
+ruleset, and dedicated release-identity controls in
+[`docs/RELEASE_GOVERNANCE.md`](./docs/RELEASE_GOVERNANCE.md). The pre-approval job runs a GET-only,
+fail-closed readiness check; missing controls are `not_ready`, and API-inaccessible controls are
+`unknown_due_to_permissions`, never ready.
+
+For the one-time operator-run publication procedure, see
+[`local-steps.md`](./local-steps.md). It derives the merge commit from GitHub and publishes the same
+five annotated tags with one atomic push.
 
 ## Third-party code
 
