@@ -48,12 +48,11 @@ explicitly preserves generated `arm64` target directories that the inherited Vis
 would otherwise omit. Validation also rejects undeclared files under the generated platform roots
 and prevents a pull request from deleting or removing targets already published on its base branch.
 
-The validator accepts the legacy provenance schema 1 layout, where each archive and duplicate header
-are under the module's `native/` directory, and the vendoring-safe schema 2 layout introduced by
-[`Azure/azure-sdk-for-rust#5289`](https://github.com/Azure/azure-sdk-for-rust/pull/5289). Schema 2
-requires `static_library_path` to identify the archive at the module root, keeps only the root header,
-links with `-L${SRCDIR}`, and rejects stale `native/` directories or `.syso` outputs. The schema
-selects one exact layout; mixed layouts are not accepted.
+The validator follows the vendoring-safe provenance schema 2 layout introduced by
+[`Azure/azure-sdk-for-rust#5289`](https://github.com/Azure/azure-sdk-for-rust/pull/5289). It requires
+`static_library_path` to identify the archive at the module root, keeps only the root header, links
+with `-L${SRCDIR}`, and rejects legacy schema 1 manifests, stale `native/` directories, or `.syso`
+outputs.
 
 Run the checks locally with:
 

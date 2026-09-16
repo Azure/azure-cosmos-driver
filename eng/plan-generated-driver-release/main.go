@@ -1046,7 +1046,7 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	if err := ensureJSONEnd(decoder); err != nil {
 		return provenance{}, fmt.Errorf("parse provenance.json: %w", err)
 	}
-	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != 2 {
+	if manifest.SchemaVersion != 2 {
 		return manifest, fmt.Errorf("unsupported provenance schema_version %d", manifest.SchemaVersion)
 	}
 	if !commitPattern.MatchString(manifest.SourceCommit) {
@@ -1066,24 +1066,14 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	actualModules := make(map[string]int, len(manifest.Targets))
 	for _, target := range manifest.Targets {
 		actualModules[target.ModulePath]++
-		switch manifest.SchemaVersion {
-		case 1:
-			if target.StaticLibraryPath != "" {
-				return manifest, fmt.Errorf(
-					"schema 1 target %q must not declare static_library_path",
-					target.ModulePath,
-				)
-			}
-		case 2:
-			expected := path.Join(target.ModulePath, "libazurecosmosdriver.a")
-			if target.StaticLibraryPath != expected {
-				return manifest, fmt.Errorf(
-					"target %q static_library_path is %q; expected %q",
-					target.ModulePath,
-					target.StaticLibraryPath,
-					expected,
-				)
-			}
+		expected := path.Join(target.ModulePath, "libazurecosmosdriver.a")
+		if target.StaticLibraryPath != expected {
+			return manifest, fmt.Errorf(
+				"target %q static_library_path is %q; expected %q",
+				target.ModulePath,
+				target.StaticLibraryPath,
+				expected,
+			)
 		}
 	}
 	var missing, extra, duplicate []string
@@ -1116,24 +1106,18 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	}
 
 	for _, modulePath := range expectedModulePaths {
-		headers := []string{"azurecosmosdriver.h"}
-		if manifest.SchemaVersion == 1 {
-			headers = append(headers, filepath.Join("native", "azurecosmosdriver.h"))
+		filename := filepath.Join(root, filepath.FromSlash(modulePath), "azurecosmosdriver.h")
+		headerVersion, err := readHeaderVersion(filename)
+		if err != nil {
+			return manifest, err
 		}
-		for _, relativeHeader := range headers {
-			filename := filepath.Join(root, filepath.FromSlash(modulePath), relativeHeader)
-			headerVersion, err := readHeaderVersion(filename)
-			if err != nil {
-				return manifest, err
-			}
-			if headerVersion != manifest.NativeInterfaceVersion {
-				return manifest, fmt.Errorf(
-					"header %q version %q does not match native interface version %q",
-					filepath.ToSlash(filename),
-					headerVersion,
-					manifest.NativeInterfaceVersion,
-				)
-			}
+		if headerVersion != manifest.NativeInterfaceVersion {
+			return manifest, fmt.Errorf(
+				"header %q version %q does not match native interface version %q",
+				filepath.ToSlash(filename),
+				headerVersion,
+				manifest.NativeInterfaceVersion,
+			)
 		}
 	}
 	return manifest, nil
