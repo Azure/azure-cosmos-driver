@@ -41,12 +41,18 @@ Generated-driver pull requests are checked by
 discovers every nested Go module, verifies its generated link file and module identity, and
 cryptographically cross-checks every archive and header against both `provenance.json` and
 `SHA256SUMS`. On Linux AMD64 it also links and runs a temporary cgo consumer that compares the
-runtime native-driver version with the committed header version. This smoke test uses normal Go
-module replacement semantics, matching module-cache/proxy consumption without vendoring. The
-repository's `.gitignore`
+runtime native-driver version with the committed header version, first through normal module
+replacement and then after `go mod vendor`. The vendored check verifies that Go preserved the
+root-level archive and header byte-for-byte before linking them. The repository's `.gitignore`
 explicitly preserves generated `arm64` target directories that the inherited Visual Studio rules
 would otherwise omit. Validation also rejects undeclared files under the generated platform roots
 and prevents a pull request from deleting or removing targets already published on its base branch.
+
+The validator requires the vendoring-safe provenance schema 2 layout introduced by
+[`Azure/azure-sdk-for-rust#5289`](https://github.com/Azure/azure-sdk-for-rust/pull/5289). Each module
+contains `libazurecosmosdriver.a` and `azurecosmosdriver.h` at its root, links with `-L${SRCDIR}`,
+and records the exact archive path and Rust toolchain in `provenance.json`. Legacy `native/`
+directories, `.syso` files, and schema 1 manifests are rejected.
 
 Run the checks locally with:
 

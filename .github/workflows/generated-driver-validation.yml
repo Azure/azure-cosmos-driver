@@ -53,5 +53,5 @@ jobs:
         with:
           go-version: "1.25.x"
           cache: false
-      - name: Link and run native consumer
+      - name: Link and run direct and vendored native consumers
         run: go run ./eng/validate-generated-driver/main.go native-smoke
