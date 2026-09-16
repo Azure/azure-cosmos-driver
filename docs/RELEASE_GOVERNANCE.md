@@ -52,7 +52,6 @@ match `/`. Ruleset API conditions use full ref names, so use these exact include
 exclude patterns:
 
 ```text
-refs/tags/windows/amd64/v*
 refs/tags/linux/amd64/v*
 refs/tags/linux/arm64/v*
 refs/tags/linux/amd64-musl/v*
@@ -75,7 +74,7 @@ tag immutability:
 | `generated-driver-tag-creation` | Restrict creations | Exactly the approved release GitHub App integration, `always` mode |
 | `generated-driver-tag-immutability` | Restrict updates, restrict deletions, block non-fast-forward updates | None |
 
-Both rulesets must use exactly the six patterns above. Do not grant organization administrators,
+Both rulesets must use exactly the five patterns above. Do not grant organization administrators,
 repository administrators, teams, users, Deploy Keys, or the generic GitHub Actions integration a
 bypass on the immutability ruleset. Never force, move, delete, or reuse a published version tag.
 
@@ -148,7 +147,7 @@ timestamp. Redact secrets and tokens.
 
 ## Version and consumption policy
 
-The six module tags are immutable and published in lockstep. A bad release is corrected with a new
+The five module tags are immutable and published in lockstep. A bad release is corrected with a new
 SemVer version; an existing tag is never repointed. A future policy may use Go's `retract` directive,
 but generated-module retraction and upstream Rust automation are outside this phase.
 

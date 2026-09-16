@@ -43,7 +43,6 @@ var (
 		`(?m)^[\t ]*#define[\t ]+AZURECOSMOSDRIVER_H_VERSION[\t ]+"([^"\r\n]+)"[\t ]*(?:[/][/*].*)?$`,
 	)
 	expectedModulePaths = []string{
-		"windows/amd64",
 		"linux/amd64",
 		"linux/arm64",
 		"linux/amd64-musl",
@@ -88,16 +87,18 @@ type provenance struct {
 	NativeInterfaceVersion string             `json:"native_interface_version"`
 	RustDriverCrate        string             `json:"rust_driver_crate"`
 	RustDriverVersion      string             `json:"rust_driver_version"`
+	RustToolchain          json.RawMessage    `json:"rust_toolchain"`
 	Targets                []provenanceTarget `json:"targets"`
 }
 
 type provenanceTarget struct {
-	ID                  string `json:"id"`
-	Triple              string `json:"triple"`
-	ModulePath          string `json:"module_path"`
-	StaticLibraryPath   string `json:"static_library_path,omitempty"`
-	StaticLibrarySHA256 string `json:"static_library_sha256"`
-	HeaderSHA256        string `json:"header_sha256"`
+	ID                  string          `json:"id"`
+	Triple              string          `json:"triple"`
+	ModulePath          string          `json:"module_path"`
+	StaticLibraryPath   string          `json:"static_library_path,omitempty"`
+	StaticLibrarySHA256 string          `json:"static_library_sha256"`
+	HeaderSHA256        string          `json:"header_sha256"`
+	Toolchain           json.RawMessage `json:"toolchain"`
 }
 
 type gitObject struct {
@@ -698,7 +699,7 @@ func publishRelease(
 		if verifyStatus == "eligible_to_publish" {
 			result.Status = "blocked"
 			result.Reasons = []string{
-				fmt.Sprintf("atomic push was rejected and remote verification found all six tags absent: %v", pushErr),
+				fmt.Sprintf("atomic push was rejected and remote verification found all five tags absent: %v", pushErr),
 			}
 			return result, errors.New(result.Reasons[0])
 		}
@@ -711,7 +712,7 @@ func publishRelease(
 	}
 	if verifyStatus == "already_published" {
 		result.Status = "published"
-		result.Reasons = []string{"all six published tags resolve to the derived merge SHA"}
+		result.Reasons = []string{"all five published tags resolve to the derived merge SHA"}
 		return result, nil
 	}
 	result.Status = "indeterminate"
@@ -738,7 +739,7 @@ func validateApprovedPlan(approved releasePlan, options publishOptions, pr pullR
 		return errors.New("approved plan repository, PR, merge, base, or version does not match fresh inputs")
 	}
 	if len(approved.Modules) != len(expectedModulePaths) {
-		return fmt.Errorf("approved plan contains %d modules; expected six", len(approved.Modules))
+		return fmt.Errorf("approved plan contains %d modules; expected five", len(approved.Modules))
 	}
 	for index, modulePath := range expectedModulePaths {
 		module := approved.Modules[index]
@@ -1098,7 +1099,7 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	sort.Strings(duplicate)
 	if len(missing) != 0 || len(extra) != 0 || len(duplicate) != 0 {
 		return manifest, fmt.Errorf(
-			"expected exactly six lockstep modules (missing=%v extra=%v duplicate=%v)",
+			"expected exactly five lockstep modules (missing=%v extra=%v duplicate=%v)",
 			missing,
 			extra,
 			duplicate,
@@ -1173,15 +1174,15 @@ func classifyTags(
 
 	switch {
 	case absentCount == len(expectedModulePaths):
-		return modules, "eligible_to_publish", []string{"all six proposed tags are absent"}
+		return modules, "eligible_to_publish", []string{"all five proposed tags are absent"}
 	case targetCount == len(expectedModulePaths):
-		return modules, "already_published", []string{"all six proposed tags already resolve to the derived merge SHA; publication is idempotent"}
+		return modules, "already_published", []string{"all five proposed tags already resolve to the derived merge SHA; publication is idempotent"}
 	default:
 		if absentCount > 0 && targetCount > 0 {
-			reasons = append(reasons, "only a subset of the six lockstep tags is present at the derived merge SHA")
+			reasons = append(reasons, "only a subset of the five lockstep tags is present at the derived merge SHA")
 		}
 		if len(reasons) == 0 {
-			reasons = append(reasons, "the six lockstep tags are not in a publishable or idempotent state")
+			reasons = append(reasons, "the five lockstep tags are not in a publishable or idempotent state")
 		}
 		sort.Strings(reasons)
 		return modules, "blocked", reasons
@@ -1549,7 +1550,7 @@ func validateGovernanceConfig(config governanceConfig) error {
 		return errors.New("governance must require the azure-cosmos-sdk reviewer team and prevent self-review")
 	}
 	if !sameStringSet(config.TagRulesets.RefNamePatterns, expectedGovernanceTagPatterns()) {
-		return errors.New("governance tag patterns must exactly match the six generated-driver tag namespaces")
+		return errors.New("governance tag patterns must exactly match the five generated-driver tag namespaces")
 	}
 	if config.TagRulesets.Creation.Name == "" || config.TagRulesets.Immutability.Name == "" {
 		return errors.New("governance creation and immutability ruleset names are required")
@@ -1882,7 +1883,7 @@ func evaluateCreationRuleset(
 		!sameStringSet(ruleset.Conditions.RefName.Include, config.TagRulesets.RefNamePatterns) ||
 		len(ruleset.Conditions.RefName.Exclude) != 0 ||
 		!sameStringSet(ruleTypes(ruleset), []string{"creation"}) {
-		add("tag_creation_ruleset", "not_ready", "active creation ruleset must use only the exact six tag patterns and creation restriction")
+		add("tag_creation_ruleset", "not_ready", "active creation ruleset must use only the exact five tag patterns and creation restriction")
 		return
 	}
 	actor := config.TagRulesets.Creation.Actor
@@ -1912,7 +1913,7 @@ func evaluateImmutabilityRuleset(
 		add(
 			"tag_immutability_ruleset",
 			"not_ready",
-			"active no-bypass immutability ruleset must block update, deletion, and non-fast-forward changes for the exact six patterns",
+			"active no-bypass immutability ruleset must block update, deletion, and non-fast-forward changes for the exact five patterns",
 		)
 		return
 	}
@@ -2080,7 +2081,7 @@ func appendPublicationSummary(filename string, result publicationResult) error {
 	fmt.Fprintln(writer)
 	fmt.Fprintln(
 		writer,
-		"> Publication uses one non-forced atomic push for six annotated tags. It never moves or deletes tags and does not create a GitHub Release.",
+		"> Publication uses one non-forced atomic push for five annotated tags. It never moves or deletes tags and does not create a GitHub Release.",
 	)
 	if err := writer.Flush(); err != nil {
 		return fmt.Errorf("write GitHub Step Summary: %w", err)

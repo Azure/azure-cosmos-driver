@@ -11,7 +11,6 @@
   },
   "tag_rulesets": {
     "ref_name_patterns": [
-      "refs/tags/windows/amd64/v*",
       "refs/tags/linux/amd64/v*",
       "refs/tags/linux/arm64/v*",
       "refs/tags/linux/amd64-musl/v*",

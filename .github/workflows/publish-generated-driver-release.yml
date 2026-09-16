@@ -140,7 +140,7 @@ jobs:
           retention-days: 14
 
   publish:
-    name: Atomically publish six module tags
+    name: Atomically publish five module tags
     needs: plan
     if: >-
       ${{

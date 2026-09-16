@@ -13,12 +13,12 @@ crate in [`azure-sdk-for-rust`](https://github.com/Azure/azure-sdk-for-rust) —
 
 > **This repository is under active bootstrap. Its contents and structure are still being defined.**
 
-- **Release state:** generated-driver pull requests can be validated and planned for release, but
-  publishing is not automated.
+- **Release state:** generated-driver pull requests can be validated and planned for release. The
+  publication workflow is checked in but remains operationally disabled until governance is ready.
 - **Supported platforms:** _TBD_ — see the table below for what exists today.
-- **Versioning / release tags:** six lockstep, path-prefixed module tags (for example,
+- **Versioning / release tags:** five lockstep, path-prefixed module tags (for example,
   `linux/amd64/v0.1.0`).
-- **Publishing pipeline (signed, released module zips):** _TBD_.
+- **Signing and private-module download verification:** _TBD_.
 
 ## Repository layout
 
@@ -26,9 +26,11 @@ One Go module per `GOOS/GOARCH`, each shipping a prebuilt static library:
 
 | Platform (`GOOS/GOARCH`) | Module | State |
 |---|---|---|
-| `windows/amd64` | [`windows/amd64`](./windows/amd64) | Available |
-| `darwin/arm64` | `darwin/arm64` | In progress |
-| `linux/amd64`, `linux/arm64` | — | Not yet available |
+| `darwin/arm64` | `darwin/arm64` | Schema 2 release contract |
+| `linux/amd64` | `linux/amd64` | Schema 2 release contract |
+| `linux/arm64` | `linux/arm64` | Schema 2 release contract |
+| `linux/amd64-musl` | `linux/amd64-musl` | Schema 2 release contract |
+| `linux/arm64-musl` | `linux/arm64-musl` | Schema 2 release contract |
 
 Each target module has no Go API surface — it is **blank-imported** by the consuming package so that
 its `#cgo LDFLAGS` participate in the final program link. See each module's own `README.md` for build
@@ -73,11 +75,10 @@ workflow derives the durable merge commit from GitHub, requires the pull request
 checks out that exact commit, verifies it is reachable from the current remote default branch, and runs
 the generated-driver integrity validator against the pull request's base SHA.
 
-The planner requires these six nested modules and proposes one lockstep tag for each:
+The planner requires these five nested modules and proposes one lockstep tag for each:
 
 | Module | Proposed tag shape |
 |---|---|
-| `windows/amd64` | `windows/amd64/vX.Y.Z` |
 | `linux/amd64` | `linux/amd64/vX.Y.Z` |
 | `linux/arm64` | `linux/arm64/vX.Y.Z` |
 | `linux/amd64-musl` | `linux/amd64-musl/vX.Y.Z` |
@@ -91,8 +92,8 @@ currently carry Go's required `/vN` suffix.
 
 The plan status is:
 
-- `eligible_to_publish` when all six proposed tags are absent.
-- `already_published` when all six tags, including annotated tags, resolve to the derived merge
+- `eligible_to_publish` when all five proposed tags are absent.
+- `already_published` when all five tags, including annotated tags, resolve to the derived merge
   commit.
 - `blocked` for partial publication, a tag at another commit, malformed tag state, invalid release
   identity, or failed integrity/continuity checks.
@@ -127,9 +128,9 @@ Git credentials are required for its single push.
 After approval, the publisher re-fetches the default branch, re-resolves the pull request, and reruns
 the integrity, release-identity, continuity, module, and remote-tag checks. The approved canonical
 plan digest must exactly match the fresh plan, including the PR, merge SHA, version, default-branch
-ancestry requirement, release identity, and six module tags. The observed default-branch tips are
+ancestry requirement, release identity, and five module tags. The observed default-branch tips are
 reported for auditability but excluded from the digest, so an unrelated `main` advance does not block
-publication while the target merge remains reachable. If all tags are absent, it creates six
+publication while the target merge remains reachable. If all tags are absent, it creates five
 deterministic, unsigned annotated tags targeting the exact merge commit and invokes one command
 equivalent to:
 
@@ -137,11 +138,11 @@ equivalent to:
 git push --atomic origin refs/tags/<module>/vX.Y.Z:refs/tags/<module>/vX.Y.Z ...
 ```
 
-There is no sequential fallback. The publisher never forces, moves, or deletes a tag. If all six tags
+There is no sequential fallback. The publisher never forces, moves, or deletes a tag. If all five tags
 already resolve recursively to the expected merge commit, the run is an `already_published` no-op.
 Partial, mismatched, malformed, or drifted state is `blocked`. An ambiguous result after the one
 atomic push attempt is `indeterminate`; rerun only after inspecting the result, and a fresh rerun can
-then establish `already_published`. The workflow verifies all six remote refs after publication and
+then establish `already_published`. The workflow verifies all five remote refs after publication and
 emits a non-sensitive JSON result and GitHub Step Summary.
 
 The tags are currently unsigned because the repository has no established non-secret signing
@@ -154,6 +155,10 @@ ruleset, and dedicated release-identity controls in
 [`docs/RELEASE_GOVERNANCE.md`](./docs/RELEASE_GOVERNANCE.md). The pre-approval job runs a GET-only,
 fail-closed readiness check; missing controls are `not_ready`, and API-inaccessible controls are
 `unknown_due_to_permissions`, never ready.
+
+For the one-time operator-run publication procedure, see
+[`local-steps.md`](./local-steps.md). It derives the merge commit from GitHub and publishes the same
+five annotated tags with one atomic push.
 
 ## Third-party code
 

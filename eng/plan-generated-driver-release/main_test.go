@@ -50,6 +50,20 @@ func TestValidateVersion(t *testing.T) {
 	}
 }
 
+func TestExpectedModulePathsMatchSchemaTwoReleaseContract(t *testing.T) {
+	t.Parallel()
+	want := []string{
+		"linux/amd64",
+		"linux/arm64",
+		"linux/amd64-musl",
+		"linux/arm64-musl",
+		"darwin/arm64",
+	}
+	if !reflect.DeepEqual(expectedModulePaths, want) {
+		t.Fatalf("expectedModulePaths = %v, want %v", expectedModulePaths, want)
+	}
+}
+
 func TestValidatePullRequest(t *testing.T) {
 	t.Parallel()
 	valid := testPullRequest()
@@ -281,7 +295,7 @@ func TestValidateReleaseContractRejectsInvalidStaticLibraryPath(t *testing.T) {
 		{
 			name: "legacy path",
 			mutate: func(manifest *provenance) {
-				manifest.Targets[0].StaticLibraryPath = "windows/amd64/native/libazurecosmosdriver.a"
+				manifest.Targets[0].StaticLibraryPath = "linux/amd64/native/libazurecosmosdriver.a"
 			},
 			want: "static_library_path is",
 		},
@@ -331,7 +345,7 @@ func TestValidateReleaseContractRejectsModuleSetChanges(t *testing.T) {
 		{
 			"missing module",
 			func(manifest *provenance) { manifest.Targets = manifest.Targets[1:] },
-			"missing=[windows/amd64]",
+			"missing=[linux/amd64]",
 		},
 		{
 			"extra module",
@@ -574,7 +588,7 @@ func TestRunPlanCommandWritesBlockedPlanForCandidateHEADMismatch(t *testing.T) {
 	}
 }
 
-func TestPublishReleaseCreatesSixAnnotatedTagsWithOneAtomicPush(t *testing.T) {
+func TestPublishReleaseCreatesFiveAnnotatedTagsWithOneAtomicPush(t *testing.T) {
 	t.Parallel()
 	root := writeContractFixture(t, "0.1.0")
 	approved := testReleasePlan("eligible_to_publish", absentTagResolutions("0.1.0"))
@@ -820,7 +834,7 @@ func TestPlanDigestBindsImmutableApprovalContract(t *testing.T) {
 		},
 		{
 			name:   "module tag",
-			mutate: func(plan *releasePlan) { plan.Modules[0].Tag = "windows/amd64/v0.2.0" },
+			mutate: func(plan *releasePlan) { plan.Modules[0].Tag = "linux/amd64/v0.2.0" },
 		},
 		{
 			name:   "module tag state",
@@ -1119,16 +1133,16 @@ func TestEvaluateGovernanceRejectsIncompleteOrUnsafeState(t *testing.T) {
 		{
 			name: "mismatched tag patterns",
 			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
-				snapshot.Rulesets[0].Conditions.RefName.Include[0] = "refs/tags/windows/arm64/v*"
+				snapshot.Rulesets[0].Conditions.RefName.Include[0] = "refs/tags/darwin/amd64/v*"
 			},
-			want: "exact six tag patterns",
+			want: "exact five tag patterns",
 		},
 		{
 			name: "broad unsafe tag pattern",
 			mutate: func(_ *governanceConfig, snapshot *governanceSnapshot) {
 				snapshot.Rulesets[0].Conditions.RefName.Include[0] = "refs/tags/**"
 			},
-			want: "exact six tag patterns",
+			want: "exact five tag patterns",
 		},
 		{
 			name: "disabled ruleset",
@@ -1622,6 +1636,7 @@ func writeContractFixture(t *testing.T, version string) string {
 		targets = append(targets, provenanceTarget{
 			ModulePath:        modulePath,
 			StaticLibraryPath: modulePath + "/libazurecosmosdriver.a",
+			Toolchain:         json.RawMessage(`{"target":"fixture"}`),
 		})
 		writeFileForTest(t, filepath.Join(root, filepath.FromSlash(modulePath), "azurecosmosdriver.h"), header)
 	}
@@ -1632,6 +1647,7 @@ func writeContractFixture(t *testing.T, version string) string {
 		NativeInterfaceVersion: version,
 		RustDriverCrate:        "azure_data_cosmos_driver",
 		RustDriverVersion:      "0.8.0",
+		RustToolchain:          json.RawMessage(`{"channel":"fixture"}`),
 		Targets:                targets,
 	})
 	return root

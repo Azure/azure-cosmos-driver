@@ -436,7 +436,6 @@ func writeMatrixFixtureAt(t *testing.T, root string) {
 		triple     string
 		modulePath string
 	}{
-		{"windows-amd64", "x86_64-pc-windows-gnu", "windows/amd64"},
 		{"linux-amd64-glibc", "x86_64-unknown-linux-gnu", "linux/amd64"},
 		{"linux-arm64-glibc", "aarch64-unknown-linux-gnu", "linux/arm64"},
 		{"linux-amd64-musl", "x86_64-unknown-linux-musl", "linux/amd64-musl"},
