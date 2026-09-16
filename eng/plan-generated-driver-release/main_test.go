@@ -241,6 +241,85 @@ func TestValidateReleaseContract(t *testing.T) {
 	}
 }
 
+func TestValidateReleaseContractAcceptsSchema2FlatLayout(t *testing.T) {
+	t.Parallel()
+	root := writeContractFixtureForSchema(t, "0.1.0", 2)
+	manifest, err := validateReleaseContract(root, "0.1.0")
+	if err != nil {
+		t.Fatalf("validateReleaseContract() error = %v", err)
+	}
+	if manifest.SchemaVersion != 2 {
+		t.Fatalf("SchemaVersion = %d, want 2", manifest.SchemaVersion)
+	}
+	for _, target := range manifest.Targets {
+		expected := target.ModulePath + "/libazurecosmosdriver.a"
+		if target.StaticLibraryPath != expected {
+			t.Fatalf(
+				"target %q StaticLibraryPath = %q, want %q",
+				target.ModulePath,
+				target.StaticLibraryPath,
+				expected,
+			)
+		}
+	}
+}
+
+func TestValidateReleaseContractRejectsSchemaSpecificStaticLibraryPath(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		schemaVersion int
+		mutate        func(*provenance)
+		want          string
+	}{
+		{
+			name:          "schema 2 missing path",
+			schemaVersion: 2,
+			mutate: func(manifest *provenance) {
+				manifest.Targets[0].StaticLibraryPath = ""
+			},
+			want: "static_library_path is",
+		},
+		{
+			name:          "schema 2 legacy path",
+			schemaVersion: 2,
+			mutate: func(manifest *provenance) {
+				manifest.Targets[0].StaticLibraryPath = "windows/amd64/native/libazurecosmosdriver.a"
+			},
+			want: "static_library_path is",
+		},
+		{
+			name:          "schema 2 unsafe path",
+			schemaVersion: 2,
+			mutate: func(manifest *provenance) {
+				manifest.Targets[0].StaticLibraryPath = "../libazurecosmosdriver.a"
+			},
+			want: "static_library_path is",
+		},
+		{
+			name:          "schema 1 path must be absent",
+			schemaVersion: 1,
+			mutate: func(manifest *provenance) {
+				manifest.Targets[0].StaticLibraryPath = "windows/amd64/libazurecosmosdriver.a"
+			},
+			want: "schema 1 target",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			root := writeContractFixtureForSchema(t, "0.1.0", test.schemaVersion)
+			manifest := readContractProvenance(t, root)
+			test.mutate(&manifest)
+			writeJSONForTest(t, filepath.Join(root, "provenance.json"), manifest)
+			_, err := validateReleaseContract(root, "0.1.0")
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("validateReleaseContract() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestValidateReleaseContractRejectsModuleSetChanges(t *testing.T) {
 	t.Parallel()
 	for _, test := range []struct {
@@ -1532,20 +1611,34 @@ func testPullRequest() pullRequest {
 
 func writeContractFixture(t *testing.T, version string) string {
 	t.Helper()
+	return writeContractFixtureForSchema(t, version, 1)
+}
+
+func writeContractFixtureForSchema(t *testing.T, version string, schemaVersion int) string {
+	t.Helper()
 	root := t.TempDir()
 	header := fmt.Sprintf("#define AZURECOSMOSDRIVER_H_VERSION \"%s\"\n", version)
 	targets := make([]provenanceTarget, 0, len(expectedModulePaths))
 	for _, modulePath := range expectedModulePaths {
-		targets = append(targets, provenanceTarget{ModulePath: modulePath})
+		staticLibraryPath := ""
+		if schemaVersion == 2 {
+			staticLibraryPath = modulePath + "/libazurecosmosdriver.a"
+		}
+		targets = append(targets, provenanceTarget{
+			ModulePath:        modulePath,
+			StaticLibraryPath: staticLibraryPath,
+		})
 		writeFileForTest(t, filepath.Join(root, filepath.FromSlash(modulePath), "azurecosmosdriver.h"), header)
-		writeFileForTest(
-			t,
-			filepath.Join(root, filepath.FromSlash(modulePath), "native", "azurecosmosdriver.h"),
-			header,
-		)
+		if schemaVersion == 1 {
+			writeFileForTest(
+				t,
+				filepath.Join(root, filepath.FromSlash(modulePath), "native", "azurecosmosdriver.h"),
+				header,
+			)
+		}
 	}
 	writeJSONForTest(t, filepath.Join(root, "provenance.json"), provenance{
-		SchemaVersion:          1,
+		SchemaVersion:          schemaVersion,
 		SourceCommit:           testSourceSHA,
 		NativeInterfaceCrate:   "azure_data_cosmos_driver_native",
 		NativeInterfaceVersion: version,

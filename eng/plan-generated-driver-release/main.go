@@ -16,6 +16,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -94,6 +95,7 @@ type provenanceTarget struct {
 	ID                  string `json:"id"`
 	Triple              string `json:"triple"`
 	ModulePath          string `json:"module_path"`
+	StaticLibraryPath   string `json:"static_library_path,omitempty"`
 	StaticLibrarySHA256 string `json:"static_library_sha256"`
 	HeaderSHA256        string `json:"header_sha256"`
 }
@@ -1044,7 +1046,7 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	if err := ensureJSONEnd(decoder); err != nil {
 		return provenance{}, fmt.Errorf("parse provenance.json: %w", err)
 	}
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != 2 {
 		return manifest, fmt.Errorf("unsupported provenance schema_version %d", manifest.SchemaVersion)
 	}
 	if !commitPattern.MatchString(manifest.SourceCommit) {
@@ -1064,6 +1066,25 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	actualModules := make(map[string]int, len(manifest.Targets))
 	for _, target := range manifest.Targets {
 		actualModules[target.ModulePath]++
+		switch manifest.SchemaVersion {
+		case 1:
+			if target.StaticLibraryPath != "" {
+				return manifest, fmt.Errorf(
+					"schema 1 target %q must not declare static_library_path",
+					target.ModulePath,
+				)
+			}
+		case 2:
+			expected := path.Join(target.ModulePath, "libazurecosmosdriver.a")
+			if target.StaticLibraryPath != expected {
+				return manifest, fmt.Errorf(
+					"target %q static_library_path is %q; expected %q",
+					target.ModulePath,
+					target.StaticLibraryPath,
+					expected,
+				)
+			}
+		}
 	}
 	var missing, extra, duplicate []string
 	expected := make(map[string]struct{}, len(expectedModulePaths))
@@ -1095,7 +1116,11 @@ func validateReleaseContract(root, requestedVersion string) (provenance, error) 
 	}
 
 	for _, modulePath := range expectedModulePaths {
-		for _, relativeHeader := range []string{"azurecosmosdriver.h", filepath.Join("native", "azurecosmosdriver.h")} {
+		headers := []string{"azurecosmosdriver.h"}
+		if manifest.SchemaVersion == 1 {
+			headers = append(headers, filepath.Join("native", "azurecosmosdriver.h"))
+		}
+		for _, relativeHeader := range headers {
 			filename := filepath.Join(root, filepath.FromSlash(modulePath), relativeHeader)
 			headerVersion, err := readHeaderVersion(filename)
 			if err != nil {

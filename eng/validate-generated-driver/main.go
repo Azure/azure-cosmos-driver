@@ -46,6 +46,7 @@ type provenanceTarget struct {
 	ID                  string `json:"id"`
 	Triple              string `json:"triple"`
 	ModulePath          string `json:"module_path"`
+	StaticLibraryPath   string `json:"static_library_path,omitempty"`
 	StaticLibrarySHA256 string `json:"static_library_sha256"`
 	HeaderSHA256        string `json:"header_sha256"`
 }
@@ -159,7 +160,7 @@ func validateIntegrityAgainstBase(root, baseRef string, output io.Writer) error 
 		if !declared {
 			return fmt.Errorf("nested module %q is missing from provenance.json", modulePath)
 		}
-		if err := validateModule(repo.root, target); err != nil {
+		if err := validateModule(repo.root, repo.provenance.SchemaVersion, target); err != nil {
 			return err
 		}
 	}
@@ -168,7 +169,7 @@ func validateIntegrityAgainstBase(root, baseRef string, output io.Writer) error 
 			return fmt.Errorf("provenance target module %q has no go.mod", modulePath)
 		}
 	}
-	if err := validateGeneratedLayout(repo.root, repo.provenance.Targets); err != nil {
+	if err := validateGeneratedLayout(repo.root, repo.provenance); err != nil {
 		return err
 	}
 
@@ -302,7 +303,7 @@ func decodeProvenance(reader io.Reader) (provenance, error) {
 	if err := ensureJSONEnd(decoder); err != nil {
 		return provenance{}, err
 	}
-	if manifest.SchemaVersion != 1 {
+	if manifest.SchemaVersion != 1 && manifest.SchemaVersion != 2 {
 		return provenance{}, fmt.Errorf("unsupported provenance schema_version %d", manifest.SchemaVersion)
 	}
 	if !commitHex.MatchString(manifest.SourceCommit) {
@@ -373,18 +374,26 @@ func validateModulePath(modulePath string) error {
 	return nil
 }
 
-func validateGeneratedLayout(root string, targets []provenanceTarget) error {
-	expected := make(map[string]struct{}, len(targets)*5)
-	for _, target := range targets {
+func validateGeneratedLayout(root string, manifest provenance) error {
+	expected := make(map[string]struct{}, len(manifest.Targets)*5)
+	for _, target := range manifest.Targets {
 		parts := strings.Split(target.ModulePath, "/")
 		goarch, _, _ := strings.Cut(parts[1], "-")
-		for _, relative := range []string{
+		expectedFiles := []string{
 			path.Join(target.ModulePath, "go.mod"),
 			path.Join(target.ModulePath, fmt.Sprintf("link_%s_%s.go", parts[0], goarch)),
 			path.Join(target.ModulePath, "azurecosmosdriver.h"),
-			path.Join(target.ModulePath, "native", "azurecosmosdriver.h"),
-			path.Join(target.ModulePath, "native", "libazurecosmosdriver.a"),
-		} {
+		}
+		if manifest.SchemaVersion == 1 {
+			expectedFiles = append(
+				expectedFiles,
+				path.Join(target.ModulePath, "native", "azurecosmosdriver.h"),
+				path.Join(target.ModulePath, "native", "libazurecosmosdriver.a"),
+			)
+		} else {
+			expectedFiles = append(expectedFiles, path.Join(target.ModulePath, "libazurecosmosdriver.a"))
+		}
+		for _, relative := range expectedFiles {
 			expected[relative] = struct{}{}
 		}
 	}
@@ -409,6 +418,17 @@ func validateGeneratedLayout(root string, targets []provenanceTarget) error {
 				return fmt.Errorf("generated path is a symbolic link: %q", relative)
 			}
 			if entry.IsDir() {
+				if manifest.SchemaVersion == 2 && strings.HasSuffix(relative, "/native") {
+					modulePath := strings.TrimSuffix(relative, "/native")
+					for _, target := range manifest.Targets {
+						if target.ModulePath == modulePath {
+							return fmt.Errorf(
+								"schema 2 target %q contains the removed native directory",
+								target.ID,
+							)
+						}
+					}
+				}
 				return nil
 			}
 			if !entry.Type().IsRegular() {
@@ -426,12 +446,18 @@ func validateGeneratedLayout(root string, targets []provenanceTarget) error {
 	return nil
 }
 
-func validateModule(root string, target provenanceTarget) error {
+func validateModule(root string, schemaVersion int, target provenanceTarget) error {
 	moduleDirectory := filepath.Join(root, filepath.FromSlash(target.ModulePath))
+	staticLibraryRelative, err := staticLibraryPath(schemaVersion, target)
+	if err != nil {
+		return fmt.Errorf("target %q: %w", target.ID, err)
+	}
 	requiredFiles := map[string]string{
-		"static library": filepath.Join(moduleDirectory, "native", "libazurecosmosdriver.a"),
+		"static library": filepath.Join(root, filepath.FromSlash(staticLibraryRelative)),
 		"root header":    filepath.Join(moduleDirectory, "azurecosmosdriver.h"),
-		"native header":  filepath.Join(moduleDirectory, "native", "azurecosmosdriver.h"),
+	}
+	if schemaVersion == 1 {
+		requiredFiles["native header"] = filepath.Join(moduleDirectory, "native", "azurecosmosdriver.h")
 	}
 	for description, filename := range requiredFiles {
 		if err := requireRegularFile(root, filename); err != nil {
@@ -446,7 +472,16 @@ func validateModule(root string, target provenanceTarget) error {
 	}{
 		{"static library", requiredFiles["static library"], target.StaticLibrarySHA256},
 		{"root header", requiredFiles["root header"], target.HeaderSHA256},
-		{"native header", requiredFiles["native header"], target.HeaderSHA256},
+	}
+	if schemaVersion == 1 {
+		hashChecks = append(
+			hashChecks,
+			struct {
+				description string
+				filename    string
+				expected    string
+			}{"native header", requiredFiles["native header"], target.HeaderSHA256},
+		)
 	}
 	for _, check := range hashChecks {
 		actual, err := hashFile(check.filename)
@@ -465,7 +500,7 @@ func validateModule(root string, target provenanceTarget) error {
 	if len(linkFiles) != 1 {
 		return fmt.Errorf("target %q must contain exactly one generated link_*.go file; found %d", target.ID, len(linkFiles))
 	}
-	if err := validateLinkFile(target, linkFiles[0]); err != nil {
+	if err := validateLinkFile(schemaVersion, target, linkFiles[0]); err != nil {
 		return err
 	}
 	if err := validateGoModule(target.ModulePath, moduleDirectory); err != nil {
@@ -474,7 +509,7 @@ func validateModule(root string, target provenanceTarget) error {
 	return nil
 }
 
-func validateLinkFile(target provenanceTarget, filename string) error {
+func validateLinkFile(schemaVersion int, target provenanceTarget, filename string) error {
 	contents, err := os.ReadFile(filename)
 	if err != nil {
 		return fmt.Errorf("read target %q link file: %w", target.ID, err)
@@ -494,10 +529,21 @@ func validateLinkFile(target provenanceTarget, filename string) error {
 		"// Code generated by New-GoModules.ps1; DO NOT EDIT.",
 		fmt.Sprintf("//go:build cgo && %s && %s", goos, goarch),
 		"#cgo LDFLAGS:",
-		"-L${SRCDIR}/native",
 		"-lazurecosmosdriver",
 		`#include "azurecosmosdriver.h"`,
 		`import "C"`,
+	}
+	if schemaVersion == 1 {
+		requiredText = append(requiredText, "-L${SRCDIR}/native")
+	} else {
+		requiredText = append(requiredText, "-L${SRCDIR}")
+		if bytes.Contains(contents, []byte("${SRCDIR}/native")) {
+			return fmt.Errorf(
+				"target %q link file %q references the removed native directory",
+				target.ID,
+				filepath.Base(filename),
+			)
+		}
 	}
 	for _, required := range requiredText {
 		if !bytes.Contains(contents, []byte(required)) {
@@ -550,7 +596,10 @@ func validateGoModule(modulePath, moduleDirectory string) error {
 func validateChecksums(repo repository) error {
 	expected := make(map[string]string, len(repo.provenance.Targets))
 	for _, target := range repo.provenance.Targets {
-		relative := path.Join(target.ModulePath, "native", "libazurecosmosdriver.a")
+		relative, err := staticLibraryPath(repo.provenance.SchemaVersion, target)
+		if err != nil {
+			return fmt.Errorf("target %q: %w", target.ID, err)
+		}
 		expected[relative] = target.StaticLibrarySHA256
 	}
 
@@ -605,6 +654,31 @@ func validateChecksums(repo repository) error {
 		}
 	}
 	return nil
+}
+
+func staticLibraryPath(schemaVersion int, target provenanceTarget) (string, error) {
+	switch schemaVersion {
+	case 1:
+		if target.StaticLibraryPath != "" {
+			return "", errors.New("schema 1 target must not declare static_library_path")
+		}
+		return path.Join(target.ModulePath, "native", "libazurecosmosdriver.a"), nil
+	case 2:
+		expected := path.Join(target.ModulePath, "libazurecosmosdriver.a")
+		if target.StaticLibraryPath != expected {
+			return "", fmt.Errorf(
+				"static_library_path is %q; expected %q",
+				target.StaticLibraryPath,
+				expected,
+			)
+		}
+		if err := validateRelativeFilePath(target.StaticLibraryPath); err != nil {
+			return "", fmt.Errorf("static_library_path: %w", err)
+		}
+		return target.StaticLibraryPath, nil
+	default:
+		return "", fmt.Errorf("unsupported provenance schema_version %d", schemaVersion)
+	}
 }
 
 func validateRelativeFilePath(relative string) error {
