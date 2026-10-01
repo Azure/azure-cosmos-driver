@@ -1,10 +1,10 @@
 {
   "schema_version": 2,
-  "source_commit": "db4df3039eebd33bd2e587164e9a54e6f2ffb65b",
+  "source_commit": "62192bf69dac1a3384505971d7deef19eb8282df",
   "native_interface_crate": "azure_data_cosmos_driver_native",
-  "native_interface_version": "0.1.0",
+  "native_interface_version": "0.2.0",
   "rust_driver_crate": "azure_data_cosmos_driver",
-  "rust_driver_version": "0.8.0",
+  "rust_driver_version": "1.0.0-beta.2",
   "rust_toolchain": {
     "provider": "microsoft",
     "manager": "msrustup",
@@ -21,8 +21,8 @@
       "triple": "x86_64-unknown-linux-gnu",
       "module_path": "linux/amd64",
       "static_library_path": "linux/amd64/libazurecosmosdriver.a",
-      "static_library_sha256": "6b0a24b9c02611d7b4d3176d99becd14eab689b6a6969b9593d303bb4a53d703",
-      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "static_library_sha256": "3cc241ed6f99d4f6c6c48270f6f493997db954f3860b2ed0891f1a1d670435b8",
+      "header_sha256": "2144943f5bdf05cee2b8146581ad0dacdd12d4520c45722f1c1983078748e4e4",
       "toolchain": {
         "selected_toolchain": "ms-prod-1.95",
         "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
@@ -44,8 +44,8 @@
       "triple": "aarch64-unknown-linux-gnu",
       "module_path": "linux/arm64",
       "static_library_path": "linux/arm64/libazurecosmosdriver.a",
-      "static_library_sha256": "664dfb083c7cab924a7e6e57b9d8f8378ef081858631d42f324be4994770ea0c",
-      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "static_library_sha256": "0d61c35d72c22ced4b4ea0f94d206443c4591502e9a0397d339b0de64d26dcae",
+      "header_sha256": "2144943f5bdf05cee2b8146581ad0dacdd12d4520c45722f1c1983078748e4e4",
       "toolchain": {
         "selected_toolchain": "ms-prod-1.95",
         "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
@@ -67,8 +67,8 @@
       "triple": "aarch64-apple-darwin",
       "module_path": "darwin/arm64",
       "static_library_path": "darwin/arm64/libazurecosmosdriver.a",
-      "static_library_sha256": "282d09628db44798c3c7455a5dd57afe66a2aaba7043140f48e358b780dbd573",
-      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "static_library_sha256": "2fdc8d7c52090fe1097fd91546275e218ffdea587f477fbbafe3da3eaed63867",
+      "header_sha256": "2144943f5bdf05cee2b8146581ad0dacdd12d4520c45722f1c1983078748e4e4",
       "toolchain": {
         "selected_toolchain": "ms-prod-1.95",
         "sysroot": "/Users/runner/work/_temp/msrustup_home/packages/rust.tools.stable-llvm-aarch64-apple-darwin.1.95.0-ms-20260618.5/tools",
@@ -90,8 +90,8 @@
       "triple": "x86_64-unknown-linux-musl",
       "module_path": "linux/amd64-musl",
       "static_library_path": "linux/amd64-musl/libazurecosmosdriver.a",
-      "static_library_sha256": "92afe50043b17855bb686df14494467908663aa01fee876da784631765da5448",
-      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "static_library_sha256": "d23b01d9386d52ff81e6e421a2b178992febcac2e00a3f43af82bc27ce00e781",
+      "header_sha256": "2144943f5bdf05cee2b8146581ad0dacdd12d4520c45722f1c1983078748e4e4",
       "toolchain": {
         "selected_toolchain": "ms-prod-1.95",
         "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
@@ -113,8 +113,8 @@
       "triple": "aarch64-unknown-linux-musl",
       "module_path": "linux/arm64-musl",
       "static_library_path": "linux/arm64-musl/libazurecosmosdriver.a",
-      "static_library_sha256": "b24f33f5de5e5d9a0988021bd10be0421365e1337691bdb611cacfd0098945bf",
-      "header_sha256": "5627bf65da4e0d7bb0440b9fb73b150233cd38557938c513a923f2c7e68348e9",
+      "static_library_sha256": "6f87ad7ac3d807d5bdb642c1d9b1f87f03a6abfabbfbf454570d58cb45cd97ad",
+      "header_sha256": "2144943f5bdf05cee2b8146581ad0dacdd12d4520c45722f1c1983078748e4e4",
       "toolchain": {
         "selected_toolchain": "ms-prod-1.95",
         "sysroot": "/mnt/vss/_work/_temp/msrustup_home/packages/rust.tools.stable-compat-x86_64-unknown-linux-gnu.1.95.0-ms-20260618.5/tools",
