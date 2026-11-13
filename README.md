@@ -68,6 +68,19 @@ go run ./eng/validate-generated-driver/main.go integrity
 go run ./eng/validate-generated-driver/main.go native-smoke
 ```
 
+## Code scanning
+
+The [CodeQL workflow](./.github/workflows/codeql.yml) analyzes Go code, including
+the validator's tests, on pull requests and pushes to `main`, weekly, and on
+manual dispatch. Go autobuild discovers the nested modules and the standalone
+validator without requiring a repository-root `go.mod`. Analysis runs on Linux
+AMD64, so platform-specific Go build constraints still apply. The prebuilt Rust
+archives are not Go source and must be analyzed in their source repository.
+
+Successful default-branch runs upload the Go CodeQL database for Continuous SDL
+reporting. After enabling the workflow, verify a successful run on `main` and
+confirm that the corresponding S360 action item clears after reporting refreshes.
+
 ## Third-party code
 
 This repository does **not** vendor third-party source. It distributes a
